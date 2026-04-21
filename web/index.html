@@ -41,6 +41,14 @@
       const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
       const PROXY_URL = window.A2UI_PROXY_URL || urlOverride || (isLocal ? 'http://localhost:8787' : '');
       const MODEL = 'claude-sonnet-4-5';
+
+      // Client-side typewriter smoothing. Anthropic SSE delivers text in
+      // big chunks (30–150 chars each). That's technically streaming but
+      // visually lands as "pops". When > 0, we split each chunk into
+      // single-char appends paced at this rate, which feels like typing.
+      // Set to 0 to disable and pass chunks through unchanged.
+      // Override via ?smooth=N in URL.
+      const SMOOTH_CPS = Number(new URLSearchParams(location.search).get('smooth') ?? '220');
       // ======================================================================
 
       // ======================================================================
@@ -566,13 +574,10 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
             })) {
               const path = `/reply/${delta.fieldName}`;
               const isStreaming = !delta.isFinal;
-              this._log('updateDataModel', {
-                surfaceId: sid, path, patch: 'append',
-                value: delta.chunkValue, streaming: isStreaming,
+              await this._applyChunkSmoothly({
+                surfaceId: sid, path, chunk: delta.chunkValue, streaming: isStreaming,
               });
-              surface.applyDataModel({ path, op: 'append', value: delta.chunkValue, streaming: isStreaming });
               finalVals[delta.fieldName] = delta.accumulatedValue;
-              this.emit();
             }
           } catch (e) {
             this.lastError = String(e.message || e);
@@ -580,6 +585,37 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           }
           const historyText = Object.entries(finalVals).map(([k, v]) => `${k}: ${v}`).join('\n');
           if (historyText) this.history.push({ role: 'assistant', text: historyText });
+        }
+
+        // Apply a server chunk as N single-char appends paced by SMOOTH_CPS.
+        // Each sub-append uses RFC Proposal 3's append op + Proposal 2's
+        // streaming flag. Logs once per *server* chunk (not per char) to keep
+        // the wire log readable.
+        async _applyChunkSmoothly({ surfaceId, path, chunk, streaming }) {
+          if (!chunk) return;
+          const surface = this.surfaces.get(surfaceId);
+          if (!surface) return;
+          // Log the aggregate chunk as a single wire entry (what the server
+          // actually sent over SSE). The per-char splits are client-side
+          // smoothing, not wire events.
+          this._log('updateDataModel', {
+            surfaceId, path, patch: 'append', value: chunk, streaming,
+          });
+          if (SMOOTH_CPS <= 0) {
+            surface.applyDataModel({ path, op: 'append', value: chunk, streaming });
+            this.emit();
+            return;
+          }
+          const delayMs = Math.max(1, Math.floor(1000 / SMOOTH_CPS));
+          for (let i = 0; i < chunk.length; i++) {
+            const isLastChar = i === chunk.length - 1;
+            surface.applyDataModel({
+              path, op: 'append', value: chunk[i],
+              streaming: streaming || !isLastChar,
+            });
+            this.emit();
+            if (!isLastChar) await new Promise(r => setTimeout(r, delayMs));
+          }
         }
       }
 
