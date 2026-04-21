@@ -18,12 +18,14 @@
     <script type="importmap">
     { "imports": {
         "lit": "https://esm.sh/lit@3.2.0",
-        "lit/decorators.js": "https://esm.sh/lit@3.2.0/decorators.js"
+        "lit/decorators.js": "https://esm.sh/lit@3.2.0/decorators.js",
+        "js-yaml": "https://esm.sh/js-yaml@4.1.0"
     } }
     </script>
 
     <script type="module">
       import { LitElement, css, html, nothing } from 'lit';
+      import yaml from 'js-yaml';
 
       // ======================================================================
       // Configuration — edit this for your own deploy.
@@ -266,46 +268,64 @@ replace them with your actual content.`;
       }
 
       // ======================================================================
-      // SECTION 5 — SKILL.md parser (minimal, our-format only)
-      // Skips Yams-equivalent. Handles: frontmatter fence, name, description,
-      // triggers (bullet list), and two named blocks we inject as JS.
+      // SECTION 5 — SKILL.md + catalog loaders
+      //
+      // Skills are real .md files with YAML frontmatter (matches Anthropic's
+      // SKILL.md open standard). Catalog is JSON Schema at /catalog/catalog.json
+      // (matches Google's A2UI basic_catalog.json shape).
+      //
+      // Both loaded at app init via fetch(). The SkillRuntime is hydrated once
+      // the promises resolve.
       // ======================================================================
-      function parseSkill(md) {
-        const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(md);
+      function parseSkillMarkdown(md) {
+        const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md);
         if (!m) throw new Error('SKILL.md missing frontmatter fence');
-        const frontmatter = m[1], body = m[2];
-        const skill = { triggers: [], body };
-        // Parse top-level scalars: `key: value` (non-indented)
-        const lines = frontmatter.split(/\r?\n/);
-        let i = 0;
-        while (i < lines.length) {
-          const line = lines[i];
-          // triggers: list
-          if (/^triggers:\s*$/.test(line)) {
-            i++;
-            while (i < lines.length && /^\s+-\s/.test(lines[i])) {
-              skill.triggers.push(lines[i].replace(/^\s+-\s+/, '').trim());
-              i++;
-            }
-            continue;
-          }
-          const kv = /^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.*)$/.exec(line);
-          if (kv) {
-            const key = kv[1], val = kv[2];
-            if (key === 'name' || key === 'description') skill[key] = val.trim();
-          }
-          i++;
-        }
+        const frontmatter = yaml.load(m[1]) || {};
+        const body = m[2] || '';
+        // Normalize: skeleton components and fill_fields are what the runtime reads.
+        const skill = {
+          name: frontmatter.name,
+          description: frontmatter.description || '',
+          triggers: frontmatter.triggers || [],
+          body,
+          skeleton: frontmatter.first_turn_skeleton?.components || null,
+          fillFields: frontmatter.first_turn_fill_fields
+            ? Object.entries(frontmatter.first_turn_fill_fields).map(
+                ([name, spec]) => ({ name, description: (spec?.description ?? spec ?? '').trim() })
+              )
+            : null,
+        };
+        if (!skill.name) throw new Error('SKILL.md missing `name` in frontmatter');
         return skill;
       }
 
+      async function loadSkillBundles(ids) {
+        const results = await Promise.all(ids.map(async id => {
+          const resp = await fetch(`./skills/${id}.md`);
+          if (!resp.ok) throw new Error(`Failed to load skills/${id}.md: HTTP ${resp.status}`);
+          return parseSkillMarkdown(await resp.text());
+        }));
+        const map = new Map();
+        for (const s of results) map.set(s.name, s);
+        return map;
+      }
+
+      async function loadCatalog() {
+        const resp = await fetch('../catalog/catalog.json');
+        if (!resp.ok) return null;
+        return await resp.json();
+      }
+
       // ======================================================================
-      // SECTION 6 — Skill definitions
-      // Each skill = markdown body for LLM system prompt + JS-defined skeleton.
-      // Keeping skeletons as JS objects instead of parsing them from YAML
-      // keeps this starter bundler-free.
+      // SECTION 6 — (Removed) Inline skills
+      //
+      // Prior versions of this file defined skills as JS objects here. They
+      // now live as real SKILL.md files in /web/skills/{id}.md and are loaded
+      // at startup by loadSkillBundles() above. Keeping this section marker
+      // so the numbering lines up with the README walkthrough.
       // ======================================================================
-      const SKILLS = {
+      /* replaced — see /web/skills/ for the .md files */
+      const _SKILLS_REMOVED = {
         greeting: {
           name: 'greeting',
           description: 'Static intake — no LLM call.',
@@ -838,6 +858,8 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
             border: none; border-radius: 8px; cursor: pointer; opacity: 0.85;
           }
           .dev-toggle:hover { opacity: 1; }
+
+          .boot-state { display: flex; align-items: center; gap: 12px; padding: 40px; justify-content: center; }
         `;
 
         constructor() {
@@ -845,25 +867,58 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           this._tick = 0;
           this._composer = '';
           this._devOpen = false;
-          // Build skills map
-          const map = new Map();
-          for (const s of Object.values(SKILLS)) map.set(s.name, s);
-          // Prompt for API key if no proxy configured and none saved
-          let apiKey = '';
-          if (!PROXY_URL) {
-            apiKey = localStorage.getItem('a2ui_anthropic_key') || '';
-            if (!apiKey) {
-              apiKey = prompt('No proxy configured. Paste an Anthropic API key to run against api.anthropic.com directly (saved to localStorage; clear with console or refresh-reset).') || '';
-              if (apiKey) localStorage.setItem('a2ui_anthropic_key', apiKey);
+          this._loadStatus = 'loading';  // 'loading' | 'ready' | 'error'
+          this._loadDetail = '';
+          this.runtime = null;
+        }
+
+        async _bootstrap() {
+          try {
+            // Load catalog.json (metadata only — the runtime doesn't need it to
+            // work, but seeing it validates there's a real schema doc backing
+            // the shapes we render).
+            const catalog = await loadCatalog();
+            if (catalog) {
+              this._loadDetail = `Loaded catalog ${catalog.catalogId} with ${Object.keys(catalog.components).length} component schemas.`;
             }
+            // Load skills from /web/skills/*.md
+            const skills = await loadSkillBundles(['greeting', 'planner', 'decider', 'critic']);
+            // API key / proxy resolution
+            let apiKey = '';
+            if (!PROXY_URL) {
+              apiKey = localStorage.getItem('a2ui_anthropic_key') || '';
+              if (!apiKey) {
+                apiKey = prompt('No proxy configured. Paste an Anthropic API key to run against api.anthropic.com directly (saved to localStorage).') || '';
+                if (apiKey) localStorage.setItem('a2ui_anthropic_key', apiKey);
+              }
+            }
+            this.runtime = new SkillRuntime({ skills, defaultSkillId: 'greeting', proxyUrl: PROXY_URL, apiKey });
+            this._unsub = this.runtime.subscribe(() => { this._tick++; });
+            // Log what was loaded so the wire-log panel shows provenance.
+            this.runtime.wireLog.unshift({
+              ts: Date.now(),
+              msg: {
+                info: {
+                  loaded_catalog: catalog?.catalogId,
+                  loaded_skills: Array.from(skills.keys()),
+                  source: 'web/skills/*.md + catalog/catalog.json',
+                },
+              },
+            });
+            this._loadStatus = 'ready';
+            this._tick++;
+            this.runtime.primeGreeting();
+          } catch (err) {
+            console.error(err);
+            this._loadStatus = 'error';
+            this._loadDetail = String(err?.message || err);
+            this._tick++;
           }
-          this.runtime = new SkillRuntime({ skills: map, defaultSkillId: 'greeting', proxyUrl: PROXY_URL, apiKey });
-          this._unsub = this.runtime.subscribe(() => { this._tick++; });
         }
 
         connectedCallback() {
           super.connectedCallback();
-          this.runtime.primeGreeting();
+          this._bootstrap();
           this._scrollTimer = setInterval(() => {
             const t = this.renderRoot.querySelector('.transcript');
             if (t) t.scrollTop = t.scrollHeight;
@@ -871,20 +926,26 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
         }
         disconnectedCallback() {
           super.disconnectedCallback();
-          this._unsub();
+          this._unsub?.();
           clearInterval(this._scrollTimer);
         }
 
-        emit = (name, context, echoLabel) => this.runtime.handleUserEvent(name, context, echoLabel);
+        emit = (name, context, echoLabel) => this.runtime?.handleUserEvent(name, context, echoLabel);
 
         send() {
           const t = this._composer.trim();
-          if (!t) return;
+          if (!t || !this.runtime) return;
           this.runtime.handleUserText(t);
           this._composer = '';
         }
 
         render() {
+          if (this._loadStatus === 'loading') {
+            return html`<div class="boot-state"><div class="thinking"><span></span><span></span><span></span></div> <span class="muted">Loading catalog + SKILL.md files…</span></div>`;
+          }
+          if (this._loadStatus === 'error') {
+            return html`<div class="boot-state" style="color:#c00"><strong>Failed to bootstrap:</strong> ${this._loadDetail}</div>`;
+          }
           return html`
             <div class="main-col">
               <header class="top">
