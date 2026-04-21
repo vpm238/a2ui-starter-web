@@ -440,6 +440,14 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           this.counter = 0;
           this.listeners = new Set();
           this.lastError = null;
+          // Wire log: records every A2UI message the runtime produces.
+          // Proves we're really speaking A2UI — the devtools panel surfaces this.
+          this.wireLog = [];
+        }
+
+        _log(kind, payload) {
+          this.wireLog.push({ ts: Date.now(), msg: { version: 'v0.9', [kind]: payload } });
+          if (this.wireLog.length > 400) this.wireLog.splice(0, this.wireLog.length - 400);
         }
         subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
         emit() { for (const l of this.listeners) l(); }
@@ -448,6 +456,8 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           const greet = this.skills.get(this.defaultSkillId);
           if (!greet?.skeleton) return;
           const s = new SurfaceState('greeting');
+          this._log('createSurface', { surfaceId: 'greeting', catalogId: 'a2ui/core@0.1' });
+          this._log('updateComponents', { surfaceId: 'greeting', components: greet.skeleton });
           s.applyComponents(greet.skeleton);
           this.surfaces.set('greeting', s);
           this.turns.push({ kind: 'agent', surfaceId: 'greeting' });
@@ -489,23 +499,27 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           const surface = new SurfaceState(sid);
 
           if (skill.skeleton && skill.fillFields && skill.triggers.includes(eventName)) {
+            this._log('createSurface', { surfaceId: sid, catalogId: 'a2ui/core@0.1' });
+            this._log('updateComponents', { surfaceId: sid, components: skill.skeleton });
             surface.applyComponents(skill.skeleton);
             this.surfaces.set(sid, surface);
             this._replaceThinking(sid);
             this.emit();
-            await this._streamFill(skill, surface, userMessage);
+            await this._streamFill(skill, surface, userMessage, null, sid);
           } else {
-            // Fallback: simple Text body bound to /reply/body
-            surface.applyComponents([
+            const fallback = [
               { id: 'hdr', component: 'Text', variant: 'body', text: { path: '/reply/body' } },
               { id: 'root', component: 'Column', children: ['hdr'] },
-            ]);
+            ];
+            this._log('createSurface', { surfaceId: sid, catalogId: 'a2ui/core@0.1' });
+            this._log('updateComponents', { surfaceId: sid, components: fallback });
+            surface.applyComponents(fallback);
             this.surfaces.set(sid, surface);
             this._replaceThinking(sid);
             this.emit();
             await this._streamFill(skill, surface, userMessage, [
               { name: 'body', description: 'A direct, helpful reply. Plain prose, no markdown.' }
-            ]);
+            ], sid);
           }
           this.history.push({ role: 'user', text: userMessage });
         }
@@ -520,20 +534,23 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           this.turns.push({ kind: 'agent', surfaceId });
         }
 
-        async _streamFill(skill, surface, userMessage, fieldsOverride = null) {
+        async _streamFill(skill, surface, userMessage, fieldsOverride = null, surfaceId = null) {
           const fields = fieldsOverride || skill.fillFields;
           const systemPrompt = skill.body;
           const finalVals = {};
+          const sid = surfaceId ?? surface.id;
           try {
             for await (const delta of streamAnthropicViaProxy({
               systemPrompt, userMessage, history: this.history, fields,
               proxyUrl: this.proxyUrl, apiKey: this.apiKey,
             })) {
-              surface.applyDataModel({
-                path: `/reply/${delta.fieldName}`,
-                op: 'append', value: delta.chunkValue,
-                streaming: !delta.isFinal,
+              const path = `/reply/${delta.fieldName}`;
+              const isStreaming = !delta.isFinal;
+              this._log('updateDataModel', {
+                surfaceId: sid, path, patch: 'append',
+                value: delta.chunkValue, streaming: isStreaming,
               });
+              surface.applyDataModel({ path, op: 'append', value: delta.chunkValue, streaming: isStreaming });
               finalVals[delta.fieldName] = delta.accumulatedValue;
               this.emit();
             }
@@ -564,13 +581,30 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
               ${children.map(cid => renderComponent(cid, surface, emit))}
             </div>`;
           }
+          case 'Row': {
+            const children = resolved.children ?? [];
+            const gap = resolved.gap ?? 12;
+            const align = resolved.align ?? 'center';
+            return html`<div style="display:flex;flex-direction:row;align-items:${align};gap:${gap}px;flex-wrap:wrap">
+              ${children.map(cid => renderComponent(cid, surface, emit))}
+            </div>`;
+          }
           case 'Text': return renderText(resolved, textStreaming);
           case 'Button': return renderButton(resolved, emit);
+          case 'Link': return renderLink(resolved, emit);
           case 'Card':
             return html`<div class="card">
               ${resolved.title ? html`<h3 class="card-title">${resolved.title}</h3>` : nothing}
               ${renderComponent(resolved.child, surface, emit)}
             </div>`;
+          case 'Divider':
+            return resolved.orientation === 'vertical'
+              ? html`<div style="width:1px;background:rgba(0,0,0,0.08);align-self:stretch"></div>`
+              : html`<div style="height:1px;background:rgba(0,0,0,0.08)"></div>`;
+          case 'Image': return renderImage(resolved);
+          case 'Badge': return renderBadge(resolved);
+          case 'TextField': return renderTextField(resolved, emit);
+          case 'ProgressBar': return renderProgressBar(resolved);
           case 'OptionsGrid': return renderOptions(resolved, emit);
           case 'RichMessageCard': return renderRichMessage(resolved, emit, headlineStreaming, rationaleStreaming);
           default: return html`<span class="missing">[unsupported: ${resolved.component}]</span>`;
@@ -642,13 +676,64 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
         </button>`;
       }
 
+      // --- extended components (Row, Divider, Image, Link, Badge, TextField, ProgressBar) ---
+      function renderLink(c, emit) {
+        const label = c.label ?? '';
+        const url = c.url;
+        const ev = c.action?.event;
+        if (url) return html`<a class="a2ui-link" href="${url}" target="_blank" rel="noopener">${label}</a>`;
+        if (ev?.name) {
+          return html`<a class="a2ui-link" href="#" @click=${(e) => { e.preventDefault(); emit(ev.name, ev.context ?? {}, label); }}>${label}</a>`;
+        }
+        return html`<span class="muted">${label}</span>`;
+      }
+      function renderImage(c) {
+        const src = c.src ?? '';
+        const alt = c.alt ?? '';
+        const radius = c.cornerRadius ?? 8;
+        const maxHeight = c.maxHeight ?? 220;
+        if (!src) return html`<span class="text-shimmer" style="width:200px"></span>`;
+        return html`<img src="${src}" alt="${alt}" style="max-height:${maxHeight}px;max-width:100%;border-radius:${radius}px;display:block;object-fit:contain" />`;
+      }
+      function renderBadge(c) {
+        const label = (c.label ?? '').toUpperCase();
+        const v = c.variant ?? 'neutral';
+        return html`<span class="badge badge-${v}">${label}</span>`;
+      }
+      function renderTextField(c, emit) {
+        const label = c.label ?? '';
+        const placeholder = c.placeholder ?? '';
+        const ev = c.action?.event ?? { name: 'text_submitted', context: {} };
+        return html`<label class="tf-wrap">
+          ${label ? html`<span class="tf-label">${label}</span>` : nothing}
+          <input class="tf" placeholder=${placeholder}
+            @keydown=${(e) => {
+              if (e.key === 'Enter') {
+                const val = e.target.value.trim();
+                if (!val) return;
+                emit(ev.name, { ...(ev.context ?? {}), value: val }, val);
+                e.target.value = '';
+              }
+            }} />
+        </label>`;
+      }
+      function renderProgressBar(c) {
+        const value = Math.max(0, Math.min(1, c.value ?? 0));
+        const label = c.label;
+        return html`<div class="pb-wrap">
+          ${label ? html`<div class="pb-meta"><span>${label}</span><span>${Math.round(value * 100)}%</span></div>` : nothing}
+          <div class="pb-track"><div class="pb-fill" style="width:${value * 100}%"></div></div>
+        </div>`;
+      }
+
       // ======================================================================
       // SECTION 9 — App
       // ======================================================================
       class A2UIStarter extends LitElement {
-        static properties = { _tick: { state: true }, _composer: { state: true } };
+        static properties = { _tick: { state: true }, _composer: { state: true }, _devOpen: { state: true } };
         static styles = css`
-          :host { display: flex; flex-direction: column; height: 100%; max-width: 720px; margin: 0 auto; }
+          :host { display: grid; grid-template-columns: 1fr auto; height: 100%; max-width: 1200px; margin: 0 auto; }
+          .main-col { display: flex; flex-direction: column; min-width: 0; max-width: 720px; margin: 0 auto; width: 100%; }
           header.top { padding: 16px 20px; border-bottom: 1px solid rgba(0,0,0,0.06); display: flex; align-items: center; justify-content: space-between; background: #fff; }
           .brand { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
           .muted { font-size: 12px; color: #666; }
@@ -713,12 +798,53 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 
           .missing { color: #c00; font-family: "JetBrains Mono", monospace; font-size: 12px; }
+
+          /* ---- extended components ---- */
+          .a2ui-link { color: #2e5cff; text-decoration: underline; cursor: pointer; }
+          .a2ui-link:hover { color: #1841d6; }
+          .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font: 600 10px/1 Inter; letter-spacing: 0.5px; }
+          .badge-neutral { background: rgba(0,0,0,0.08); color: rgba(0,0,0,0.7); }
+          .badge-success { background: rgba(46,125,50,0.15); color: #2e7d32; }
+          .badge-warning { background: rgba(230,81,0,0.15); color: #e65100; }
+          .badge-danger  { background: rgba(211,47,47,0.15); color: #d32f2f; }
+          .badge-info    { background: rgba(21,101,192,0.15); color: #1565c0; }
+          .tf-wrap { display: flex; flex-direction: column; gap: 6px; }
+          .tf-label { font: 500 13px/1.2 Inter; color: #666; }
+          .tf { padding: 10px 12px; border: none; background: #f5f5f5; border-radius: 10px; font: 14px/1.4 Inter; outline: none; }
+          .tf:focus { background: #eaeaea; }
+          .pb-wrap { display: flex; flex-direction: column; gap: 6px; }
+          .pb-meta { display: flex; justify-content: space-between; font: 12px/1.2 Inter; color: #666; }
+          .pb-track { height: 6px; background: rgba(0,0,0,0.08); border-radius: 4px; overflow: hidden; }
+          .pb-fill  { height: 6px; background: #2e5cff; border-radius: 4px; transition: width 0.15s ease; }
+
+          /* ---- devtools / wire-log panel ---- */
+          .dev-col { width: 0; overflow: hidden; transition: width 0.18s ease; background: #1a1f2b; color: #c5cbd4; display: flex; flex-direction: column; }
+          .dev-col.open { width: 380px; }
+          .dev-header { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.08); }
+          .dev-title { font: 600 13px/1 Inter; color: #fff; letter-spacing: 0.02em; }
+          .dev-sub   { font: 11px/1.2 Inter; color: #8892a8; margin-top: 2px; }
+          .dev-close { background: transparent; border: none; color: #8892a8; cursor: pointer; font-size: 16px; padding: 4px 8px; }
+          .dev-close:hover { color: #fff; }
+          .dev-list  { flex: 1; overflow-y: auto; padding: 8px 10px; font: 11.5px/1.5 "JetBrains Mono", ui-monospace, monospace; }
+          .dev-entry { margin-bottom: 8px; }
+          .dev-when  { color: #7a839a; font-size: 10px; }
+          .dev-json  { white-space: pre-wrap; word-break: break-word; }
+          .dev-k     { color: #b388ff; }
+          .dev-s     { color: #ffce7a; }
+          .dev-n     { color: #8be9a0; }
+          .dev-toggle {
+            position: fixed; top: 16px; right: 16px; z-index: 10;
+            padding: 8px 12px; font: 500 12px Inter; background: #1a1f2b; color: #fff;
+            border: none; border-radius: 8px; cursor: pointer; opacity: 0.85;
+          }
+          .dev-toggle:hover { opacity: 1; }
         `;
 
         constructor() {
           super();
           this._tick = 0;
           this._composer = '';
+          this._devOpen = false;
           // Build skills map
           const map = new Map();
           for (const s of Object.values(SKILLS)) map.set(s.name, s);
@@ -760,26 +886,54 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
 
         render() {
           return html`
-            <header class="top">
-              <div class="brand">A2UI Web Starter</div>
-              <div class="muted">client-side skills · Claude-powered${PROXY_URL ? ' · via proxy' : ' · direct'}</div>
-            </header>
-            <div class="transcript">
-              <div class="transcript-inner">
-                ${this.runtime.turns.map(t => this._renderTurn(t))}
-                ${this.runtime.lastError ? html`<p class="muted" style="color:#c00">${this.runtime.lastError}</p>` : nothing}
+            <div class="main-col">
+              <header class="top">
+                <div class="brand">A2UI Web Starter</div>
+                <div class="muted">client-side skills · Claude-powered${PROXY_URL ? ' · via proxy' : ' · direct'}</div>
+              </header>
+              <div class="transcript">
+                <div class="transcript-inner">
+                  ${this.runtime.turns.map(t => this._renderTurn(t))}
+                  ${this.runtime.lastError ? html`<p class="muted" style="color:#c00">${this.runtime.lastError}</p>` : nothing}
+                </div>
               </div>
+              <footer class="bottom">
+                <div class="composer">
+                  <input .value=${this._composer}
+                    @input=${(e) => this._composer = e.target.value}
+                    @keydown=${(e) => { if (e.key === 'Enter') this.send(); }}
+                    placeholder="Type anything…" />
+                  <button @click=${() => this.send()}>Send</button>
+                </div>
+              </footer>
             </div>
-            <footer class="bottom">
-              <div class="composer">
-                <input .value=${this._composer}
-                  @input=${(e) => this._composer = e.target.value}
-                  @keydown=${(e) => { if (e.key === 'Enter') this.send(); }}
-                  placeholder="Type anything…" />
-                <button @click=${() => this.send()}>Send</button>
+            <aside class="dev-col ${this._devOpen ? 'open' : ''}">
+              <div class="dev-header">
+                <div>
+                  <div class="dev-title">A2UI Wire Log</div>
+                  <div class="dev-sub">Every message the runtime produces, in v0.9 format.</div>
+                </div>
+                <button class="dev-close" @click=${() => this._devOpen = false} title="Close">×</button>
               </div>
-            </footer>
+              <div class="dev-list">
+                ${this.runtime.wireLog.slice().reverse().slice(0, 120).map(entry => html`
+                  <div class="dev-entry">
+                    <div class="dev-when">${new Date(entry.ts).toLocaleTimeString()} · ${Object.keys(entry.msg).filter(k => k !== 'version').join(', ')}</div>
+                    <div class="dev-json">${this._highlight(JSON.stringify(entry.msg, null, 2))}</div>
+                  </div>
+                `)}
+                ${this.runtime.wireLog.length === 0 ? html`<div class="muted">No messages yet. Tap an option to see A2UI flow.</div>` : nothing}
+              </div>
+            </aside>
+            ${this._devOpen ? nothing : html`<button class="dev-toggle" @click=${() => this._devOpen = true}>Show A2UI wire log</button>`}
           `;
+        }
+
+        _highlight(s) {
+          // Lit's html` template auto-escapes interpolations, so we can't return
+          // raw HTML. Use unsafeHTML would be heavier; for dev view we skip
+          // syntax highlighting and just return the text verbatim.
+          return s;
         }
         _renderTurn(turn) {
           if (turn.kind === 'user')      return html`<div class="turn-user">${turn.text}</div>`;
