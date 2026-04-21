@@ -189,7 +189,7 @@ Same protocol. Same skill shapes. Same streaming UX.
 
 - A modern browser (Chrome/Safari/Firefox 2024+)
 - An Anthropic API key
-- For shipping: a Cloudflare account (free tier) + 5 minutes
+- For shipping: a Cloudflare account (free tier covers this)
 
 ## License
 
