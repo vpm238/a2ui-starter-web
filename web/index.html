@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A2UI Web Starter — client-side skills, LLM via proxy</title>
+    <meta name="description" content="Reference client-side A2UI host for the browser. Lit + client-side skills + Anthropic via a thin proxy. Zero bundler, zero backend state." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; font-family: Inter, system-ui, sans-serif; background: #fafafa; color: #111; }
+      #app { height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="app"><a2ui-starter></a2ui-starter></div>
+
+    <script type="importmap">
+    { "imports": {
+        "lit": "https://esm.sh/lit@3.2.0",
+        "lit/decorators.js": "https://esm.sh/lit@3.2.0/decorators.js"
+    } }
+    </script>
+
+    <script type="module">
+      import { LitElement, css, html, nothing } from 'lit';
+
+      // ======================================================================
+      // Configuration — edit this for your own deploy.
+      //
+      // If PROXY_URL is set, LLM calls POST to <PROXY_URL>/v1/messages so the
+      // API key stays in a Cloudflare Worker secret (see /proxy in this repo).
+      // If PROXY_URL is empty, the app tries direct Anthropic calls — requires
+      // a bearer token entered at runtime, which the starter will prompt for.
+      const PROXY_URL = window.A2UI_PROXY_URL || '';
+      const MODEL = 'claude-sonnet-4-5';
+      // ======================================================================
+
+      // ======================================================================
+      // SECTION 1 — JSON Pointer + path binding resolution
+      // (mirrors a2ui-swiftui's Core/Bindings.swift)
+      // ======================================================================
+      function resolvePointer(root, pointer) {
+        if (!pointer || pointer === '/' || pointer === '') return root;
+        const parts = pointer.startsWith('/') ? pointer.slice(1).split('/') : pointer.split('/');
+        let c = root;
+        for (const k of parts) {
+          if (c == null || typeof c !== 'object') return undefined;
+          c = c[k];
+        }
+        return c;
+      }
+      function setPointer(root, pointer, value) {
+        const parts = pointer.startsWith('/') ? pointer.slice(1).split('/') : pointer.split('/');
+        let c = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const k = parts[i];
+          if (typeof c[k] !== 'object' || c[k] === null) c[k] = {};
+          c = c[k];
+        }
+        c[parts[parts.length - 1]] = value;
+      }
+      function resolveBindings(v, dm) {
+        if (v == null || typeof v !== 'object') return v;
+        if (Array.isArray(v)) return v.map(x => resolveBindings(x, dm));
+        if (typeof v.path === 'string' && Object.keys(v).length === 1) return resolvePointer(dm, v.path);
+        const out = {};
+        for (const [k, val] of Object.entries(v)) out[k] = resolveBindings(val, dm);
+        return out;
+      }
+
+      // ======================================================================
+      // SECTION 2 — SurfaceState (components + data model + streaming path)
+      // Implements RFC Proposals 2 (streaming flag) and 3 (append patch op)
+      // ======================================================================
+      class SurfaceState {
+        constructor(id) {
+          this.id = id;
+          this.components = new Map();
+          this.dataModel = {};
+          this.activeStreamingPath = null;
+        }
+        applyComponents(components) {
+          for (const c of components) {
+            if (c && typeof c === 'object' && c.id) this.components.set(c.id, c);
+          }
+        }
+        applyDataModel({ path, op = 'set', value = null, streaming = false }) {
+          const isRoot = !path || path === '/' || path === '';
+          switch (op) {
+            case 'set':
+              if (isRoot) this.dataModel = value ?? {};
+              else setPointer(this.dataModel, path, value);
+              break;
+            case 'append': {
+              const existing = isRoot ? this.dataModel : resolvePointer(this.dataModel, path);
+              const merged = this._append(existing, value);
+              if (isRoot) this.dataModel = merged;
+              else setPointer(this.dataModel, path, merged);
+              break;
+            }
+            case 'remove':
+              if (!isRoot) setPointer(this.dataModel, path, null);
+              break;
+          }
+          if (streaming) this.activeStreamingPath = path ?? null;
+          else if (this.activeStreamingPath === path) this.activeStreamingPath = null;
+        }
+        isStreaming(path) { return this.activeStreamingPath === path; }
+        _append(existing, incoming) {
+          if (typeof existing === 'string' && typeof incoming === 'string') return existing + incoming;
+          if (Array.isArray(existing)) return [...existing, incoming];
+          if (existing == null) return incoming;
+          return incoming;
+        }
+      }
+
+      // ======================================================================
+      // SECTION 3 — FieldParser
+      // Port of Swift FieldParser — incrementally parses <field>text</field>
+      // ======================================================================
+      class FieldParser {
+        constructor(fieldNames) {
+          this.fieldNames = new Set(fieldNames);
+          this.buffer = '';
+          this.currentField = null;
+          this.currentValue = '';
+          this.lastEmitted = '';
+        }
+        feed(delta) {
+          this.buffer += delta;
+          const out = [];
+          while (true) {
+            if (this.currentField == null) {
+              const lt = this.buffer.indexOf('<');
+              if (lt === -1) { this.buffer = ''; return out; }
+              const gt = this.buffer.indexOf('>', lt);
+              if (gt === -1) { this.buffer = this.buffer.slice(lt); return out; }
+              const tag = this.buffer.slice(lt + 1, gt);
+              if (this.fieldNames.has(tag)) {
+                this.currentField = tag;
+                this.currentValue = '';
+                this.lastEmitted = '';
+                this.buffer = this.buffer.slice(gt + 1);
+              } else {
+                this.buffer = this.buffer.slice(gt + 1);
+              }
+            } else {
+              const closing = `</${this.currentField}>`;
+              const closeIdx = this.buffer.indexOf(closing);
+              if (closeIdx !== -1) {
+                this.currentValue += this.buffer.slice(0, closeIdx);
+                const chunk = this.currentValue.slice(this.lastEmitted.length);
+                out.push({ fieldName: this.currentField, accumulatedValue: this.currentValue, chunkValue: chunk, isFinal: true });
+                this.buffer = this.buffer.slice(closeIdx + closing.length);
+                this.currentField = null;
+                this.currentValue = '';
+                this.lastEmitted = '';
+                continue;
+              }
+              const hold = closing.length - 1;
+              if (this.buffer.length > hold) {
+                const commit = this.buffer.slice(0, this.buffer.length - hold);
+                this.currentValue += commit;
+                this.buffer = this.buffer.slice(this.buffer.length - hold);
+                if (this.currentValue !== this.lastEmitted) {
+                  const chunk = this.currentValue.slice(this.lastEmitted.length);
+                  out.push({ fieldName: this.currentField, accumulatedValue: this.currentValue, chunkValue: chunk, isFinal: false });
+                  this.lastEmitted = this.currentValue;
+                }
+              }
+              return out;
+            }
+          }
+        }
+        finish() {
+          const out = [];
+          if (this.currentField != null) {
+            this.currentValue += this.buffer;
+            if (this.currentValue !== this.lastEmitted) {
+              const chunk = this.currentValue.slice(this.lastEmitted.length);
+              out.push({ fieldName: this.currentField, accumulatedValue: this.currentValue, chunkValue: chunk, isFinal: true });
+            }
+            this.currentField = null;
+            this.buffer = '';
+          }
+          return out;
+        }
+      }
+
+      // ======================================================================
+      // SECTION 4 — LLM providers
+      // ======================================================================
+      async function* streamAnthropicViaProxy({ systemPrompt, userMessage, history, fields, proxyUrl, apiKey }) {
+        const tagTemplate = fields
+          .map(f => `<${f.name}>${f.description.trim()}</${f.name}>`)
+          .join('\n');
+        const fullSystem = systemPrompt + `
+
+## RESPONSE FORMAT
+
+Output ONLY the XML-tagged response below, filled in. No preamble, no
+commentary, no markdown code fences. Tags in the exact order shown.
+
+${tagTemplate}
+
+The descriptions above are INSTRUCTIONS for what to write inside each tag —
+replace them with your actual content.`;
+
+        const headers = { 'Content-Type': 'application/json' };
+        if (apiKey) { headers['x-api-key'] = apiKey; headers['anthropic-version'] = '2023-06-01'; }
+
+        const body = JSON.stringify({
+          model: MODEL,
+          max_tokens: 1024,
+          system: fullSystem,
+          messages: [
+            ...history.map(h => ({ role: h.role, content: h.text })),
+            { role: 'user', content: userMessage },
+          ],
+          stream: true,
+        });
+
+        const url = proxyUrl ? `${proxyUrl.replace(/\/$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
+        const resp = await fetch(url, { method: 'POST', headers, body });
+        if (!resp.ok) {
+          const err = await resp.text();
+          throw new Error(`LLM endpoint error ${resp.status}: ${err.slice(0, 200)}`);
+        }
+
+        const parser = new FieldParser(fields.map(f => f.name));
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf('\n')) !== -1) {
+            const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') continue;
+            try {
+              const ev = JSON.parse(payload);
+              if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+                for (const d of parser.feed(ev.delta.text)) yield d;
+              }
+            } catch {/* ignore partial SSE lines */}
+          }
+        }
+        for (const d of parser.finish()) yield d;
+      }
+
+      // ======================================================================
+      // SECTION 5 — SKILL.md parser (minimal, our-format only)
+      // Skips Yams-equivalent. Handles: frontmatter fence, name, description,
+      // triggers (bullet list), and two named blocks we inject as JS.
+      // ======================================================================
+      function parseSkill(md) {
+        const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(md);
+        if (!m) throw new Error('SKILL.md missing frontmatter fence');
+        const frontmatter = m[1], body = m[2];
+        const skill = { triggers: [], body };
+        // Parse top-level scalars: `key: value` (non-indented)
+        const lines = frontmatter.split(/\r?\n/);
+        let i = 0;
+        while (i < lines.length) {
+          const line = lines[i];
+          // triggers: list
+          if (/^triggers:\s*$/.test(line)) {
+            i++;
+            while (i < lines.length && /^\s+-\s/.test(lines[i])) {
+              skill.triggers.push(lines[i].replace(/^\s+-\s+/, '').trim());
+              i++;
+            }
+            continue;
+          }
+          const kv = /^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.*)$/.exec(line);
+          if (kv) {
+            const key = kv[1], val = kv[2];
+            if (key === 'name' || key === 'description') skill[key] = val.trim();
+          }
+          i++;
+        }
+        return skill;
+      }
+
+      // ======================================================================
+      // SECTION 6 — Skill definitions
+      // Each skill = markdown body for LLM system prompt + JS-defined skeleton.
+      // Keeping skeletons as JS objects instead of parsing them from YAML
+      // keeps this starter bundler-free.
+      // ======================================================================
+      const SKILLS = {
+        greeting: {
+          name: 'greeting',
+          description: 'Static intake — no LLM call.',
+          triggers: [],
+          body: `# Greeting skill\n\nRoutes to one of three specialized skills.`,
+          skeleton: [
+            { id: 'hdr',   component: 'Text', variant: 'h1',
+              text: 'What can I help you think through?' },
+            { id: 'sub',   component: 'Text', variant: 'body',
+              text: 'A few honest starting points. Pick whichever is closest to what you need.' },
+            { id: 'choice', component: 'OptionsGrid', prompt: "I'm here to…",
+              options: [
+                { id: 'plan',     label: 'Make a plan',                   rationale: 'You know roughly what you want; you need structure to move forward.', emoji: '🗺️',
+                  action: { event: { name: 'want_plan',     context: {} } } },
+                { id: 'decide',   label: 'Decide between options',         rationale: 'Two or three paths; you want a blunt second opinion.',                emoji: '⚖️',
+                  action: { event: { name: 'want_decision', context: {} } } },
+                { id: 'feedback', label: 'Get honest feedback',            rationale: 'Draft, idea, or situation you want someone to cut through.',         emoji: '🎯',
+                  action: { event: { name: 'want_feedback', context: {} } } },
+              ]
+            },
+            { id: 'root', component: 'Column', children: ['hdr', 'sub', 'choice'], gap: 16 },
+          ],
+          fillFields: null,
+        },
+
+        planner: {
+          name: 'planner', description: 'Breaks goals into 3 concrete first steps.',
+          triggers: ['want_plan'],
+          body: `# Planner skill
+
+Turn any goal into 3 specific, ordered first steps. No generic "plan your day"
+advice — real steps a person can take today.
+
+## Voice
+Direct, specific, imperative. If the user's goal is fuzzy, pick a reasonable
+concrete interpretation and go.`,
+          skeleton: [
+            { id: 'intro', component: 'Text', variant: 'h2', text: { path: '/reply/intro' } },
+            { id: 'opts', component: 'OptionsGrid', prompt: 'Take it step by step:',
+              options: [
+                { id: 's1', label: { path: '/reply/step1_label' }, rationale: { path: '/reply/step1_rationale' }, emoji: '1️⃣', action: { event: { name: 'step_1_detail', context: {} } } },
+                { id: 's2', label: { path: '/reply/step2_label' }, rationale: { path: '/reply/step2_rationale' }, emoji: '2️⃣', action: { event: { name: 'step_2_detail', context: {} } } },
+                { id: 's3', label: { path: '/reply/step3_label' }, rationale: { path: '/reply/step3_rationale' }, emoji: '3️⃣', action: { event: { name: 'step_3_detail', context: {} } } },
+              ]
+            },
+            { id: 'root', component: 'Column', children: ['intro', 'opts'], gap: 14 },
+          ],
+          fillFields: [
+            { name: 'intro',            description: 'ONE sentence framing the plan. Ends with period.' },
+            { name: 'step1_label',      description: 'The first step. Imperative verb phrase (≤7 words).' },
+            { name: 'step1_rationale',  description: 'ONE sentence explaining why this is step 1.' },
+            { name: 'step2_label',      description: 'The second step.' },
+            { name: 'step2_rationale',  description: 'ONE sentence — why this follows step 1.' },
+            { name: 'step3_label',      description: 'The third step.' },
+            { name: 'step3_rationale',  description: 'ONE sentence — why this seals the early effort.' },
+          ],
+        },
+
+        decider: {
+          name: 'decider', description: 'Weighs two options. Takes a position.',
+          triggers: ['want_decision'],
+          body: `# Decider skill
+
+Weigh two options. Name each. Take a position. Don't hedge.
+
+## Voice
+Blunt. The whole value is a second opinion that commits.`,
+          skeleton: [
+            { id: 'hdr',    component: 'Text', variant: 'h2', text: { path: '/reply/headline' } },
+            { id: 'o1_txt', component: 'Text', variant: 'body', text: { path: '/reply/option1_take' } },
+            { id: 'o1',     component: 'Card', title: { path: '/reply/option1_name' }, child: 'o1_txt' },
+            { id: 'o2_txt', component: 'Text', variant: 'body', text: { path: '/reply/option2_take' } },
+            { id: 'o2',     component: 'Card', title: { path: '/reply/option2_name' }, child: 'o2_txt' },
+            { id: 'lean',   component: 'Text', variant: 'body', text: { path: '/reply/lean' } },
+            { id: 'root',   component: 'Column', children: ['hdr', 'o1', 'o2', 'lean'], gap: 14 },
+          ],
+          fillFields: [
+            { name: 'headline',     description: 'ONE sentence introducing the comparison.' },
+            { name: 'option1_name', description: 'Short name for the first option (≤6 words).' },
+            { name: 'option1_take', description: '1-2 sentences — honest take on option 1.' },
+            { name: 'option2_name', description: 'Short name for the second option.' },
+            { name: 'option2_take', description: '1-2 sentences — honest take on option 2.' },
+            { name: 'lean',         description: 'ONE sentence starting "My lean:" — commit to a direction.' },
+          ],
+        },
+
+        critic: {
+          name: 'critic', description: 'One strong opinionated piece of feedback.',
+          triggers: ['want_feedback'],
+          body: `# Critic skill
+
+Give one honest piece of feedback. No hedging sandwich.
+
+## Voice
+First person. Direct. If it has a real problem, say so. If it's good, say that.`,
+          skeleton: [
+            { id: 'rec', component: 'RichMessageCard',
+              recommendationType: 'strong', confidence: 'medium',
+              headline:  { path: '/reply/headline' },
+              rationale: { path: '/reply/rationale' },
+              confirmAction: { label: { path: '/reply/confirm_label' },
+                event: { name: { path: '/reply/confirm_event' }, context: {} } },
+              dismissAction: { label: { path: '/reply/dismiss_label' },
+                event: { name: { path: '/reply/dismiss_event' }, context: {} } },
+            },
+            { id: 'root', component: 'Column', children: ['rec'], gap: 12 },
+          ],
+          fillFields: [
+            { name: 'headline',      description: 'ONE direct sentence — your take. No hedging.' },
+            { name: 'rationale',     description: '2-3 sentences explaining the take.' },
+            { name: 'confirm_label', description: 'Short action button text (≤5 words).' },
+            { name: 'confirm_event', description: 'Event name snake_case: concrete_fix, show_example, tradeoffs.' },
+            { name: 'dismiss_label', description: 'Short dismiss text (≤5 words).' },
+            { name: 'dismiss_event', description: 'Event name snake_case. Usually `restart`.' },
+          ],
+        },
+      };
+
+      // ======================================================================
+      // SECTION 7 — SkillRuntime (orchestrator)
+      // ======================================================================
+      class SkillRuntime {
+        constructor({ skills, defaultSkillId, proxyUrl, apiKey = '' }) {
+          this.skills = skills;
+          this.defaultSkillId = defaultSkillId;
+          this.activeSkillId = defaultSkillId;
+          this.proxyUrl = proxyUrl;
+          this.apiKey = apiKey;
+          this.surfaces = new Map();
+          this.turns = [];
+          this.history = [];
+          this.counter = 0;
+          this.listeners = new Set();
+          this.lastError = null;
+        }
+        subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+        emit() { for (const l of this.listeners) l(); }
+
+        primeGreeting() {
+          const greet = this.skills.get(this.defaultSkillId);
+          if (!greet?.skeleton) return;
+          const s = new SurfaceState('greeting');
+          s.applyComponents(greet.skeleton);
+          this.surfaces.set('greeting', s);
+          this.turns.push({ kind: 'agent', surfaceId: 'greeting' });
+          this.emit();
+        }
+
+        handleUserEvent(name, context = {}, echoLabel = null) {
+          if (echoLabel) this.turns.push({ kind: 'userPill', label: echoLabel });
+          this.turns.push({ kind: 'thinking', id: `t_${Date.now()}` });
+          this.emit();
+          this._processTurn({ userMessage: this._describeTap(name, context), eventName: name });
+        }
+        handleUserText(text) {
+          this.turns.push({ kind: 'user', text });
+          this.turns.push({ kind: 'thinking', id: `t_${Date.now()}` });
+          this.emit();
+          this._processTurn({ userMessage: text, eventName: null });
+        }
+
+        _describeTap(name, ctx) {
+          const c = Object.keys(ctx).length ? ` with context ${JSON.stringify(ctx)}` : '';
+          return `User tapped option: ${name}${c}.`;
+        }
+
+        async _processTurn({ userMessage, eventName }) {
+          // Route
+          if (eventName === 'restart') {
+            this.activeSkillId = this.defaultSkillId;
+          } else if (eventName) {
+            for (const s of this.skills.values()) {
+              if (s.triggers?.includes(eventName)) { this.activeSkillId = s.name; break; }
+            }
+          }
+          const skill = this.skills.get(this.activeSkillId);
+          if (!skill) return;
+
+          this.counter++;
+          const sid = `msg_${this.counter}`;
+          const surface = new SurfaceState(sid);
+
+          if (skill.skeleton && skill.fillFields && skill.triggers.includes(eventName)) {
+            surface.applyComponents(skill.skeleton);
+            this.surfaces.set(sid, surface);
+            this._replaceThinking(sid);
+            this.emit();
+            await this._streamFill(skill, surface, userMessage);
+          } else {
+            // Fallback: simple Text body bound to /reply/body
+            surface.applyComponents([
+              { id: 'hdr', component: 'Text', variant: 'body', text: { path: '/reply/body' } },
+              { id: 'root', component: 'Column', children: ['hdr'] },
+            ]);
+            this.surfaces.set(sid, surface);
+            this._replaceThinking(sid);
+            this.emit();
+            await this._streamFill(skill, surface, userMessage, [
+              { name: 'body', description: 'A direct, helpful reply. Plain prose, no markdown.' }
+            ]);
+          }
+          this.history.push({ role: 'user', text: userMessage });
+        }
+
+        _replaceThinking(surfaceId) {
+          for (let i = this.turns.length - 1; i >= 0; i--) {
+            if (this.turns[i].kind === 'thinking') {
+              this.turns[i] = { kind: 'agent', surfaceId };
+              return;
+            }
+          }
+          this.turns.push({ kind: 'agent', surfaceId });
+        }
+
+        async _streamFill(skill, surface, userMessage, fieldsOverride = null) {
+          const fields = fieldsOverride || skill.fillFields;
+          const systemPrompt = skill.body;
+          const finalVals = {};
+          try {
+            for await (const delta of streamAnthropicViaProxy({
+              systemPrompt, userMessage, history: this.history, fields,
+              proxyUrl: this.proxyUrl, apiKey: this.apiKey,
+            })) {
+              surface.applyDataModel({
+                path: `/reply/${delta.fieldName}`,
+                op: 'append', value: delta.chunkValue,
+                streaming: !delta.isFinal,
+              });
+              finalVals[delta.fieldName] = delta.accumulatedValue;
+              this.emit();
+            }
+          } catch (e) {
+            this.lastError = String(e.message || e);
+            this.emit();
+          }
+          const historyText = Object.entries(finalVals).map(([k, v]) => `${k}: ${v}`).join('\n');
+          if (historyText) this.history.push({ role: 'assistant', text: historyText });
+        }
+      }
+
+      // ======================================================================
+      // SECTION 8 — A2UI renderer (component dispatch + SwiftUI-parity shapes)
+      // ======================================================================
+      function renderComponent(id, surface, emit) {
+        const raw = surface.components.get(id);
+        if (!raw) return html`<span class="pending-child"></span>`;
+        const resolved = resolveBindings(raw, surface.dataModel);
+        const textStreaming     = isStreamingBinding(raw.text, surface);
+        const headlineStreaming = isStreamingBinding(raw.headline, surface);
+        const rationaleStreaming = isStreamingBinding(raw.rationale, surface);
+        switch (resolved.component) {
+          case 'Column': {
+            const children = resolved.children ?? [];
+            const gap = resolved.gap ?? 12;
+            return html`<div style="display:flex;flex-direction:column;gap:${gap}px">
+              ${children.map(cid => renderComponent(cid, surface, emit))}
+            </div>`;
+          }
+          case 'Text': return renderText(resolved, textStreaming);
+          case 'Button': return renderButton(resolved, emit);
+          case 'Card':
+            return html`<div class="card">
+              ${resolved.title ? html`<h3 class="card-title">${resolved.title}</h3>` : nothing}
+              ${renderComponent(resolved.child, surface, emit)}
+            </div>`;
+          case 'OptionsGrid': return renderOptions(resolved, emit);
+          case 'RichMessageCard': return renderRichMessage(resolved, emit, headlineStreaming, rationaleStreaming);
+          default: return html`<span class="missing">[unsupported: ${resolved.component}]</span>`;
+        }
+      }
+      function isStreamingBinding(raw, surface) {
+        return !!(raw && typeof raw === 'object' && typeof raw.path === 'string' &&
+                  Object.keys(raw).length === 1 && surface.isStreaming(raw.path));
+      }
+      function renderText(c, streaming) {
+        const v = c.variant ?? 'body';
+        const text = c.text;
+        if (text == null || text === '') {
+          return html`<span class="text-shimmer ${v}"></span>`;
+        }
+        const cls = `t-${v}`;
+        const caret = streaming ? html`<span class="caret"></span>` : nothing;
+        if (v === 'h1') return html`<h1 class="${cls}">${text}${caret}</h1>`;
+        if (v === 'h2') return html`<h2 class="${cls}">${text}${caret}</h2>`;
+        return html`<p class="${cls}">${text}${caret}</p>`;
+      }
+      function renderButton(c, emit) {
+        const ready = c.label && c.action?.event?.name;
+        const v = c.variant ?? 'primary';
+        return html`<button class="btn btn-${v}" ?disabled=${!ready}
+          @click=${() => ready && emit(c.action.event.name, c.action.event.context ?? {}, c.label)}>
+          ${ready ? c.label : html`<span class="text-shimmer btnlabel"></span>`}
+        </button>`;
+      }
+      function renderOptions(c, emit) {
+        const opts = c.options ?? [];
+        return html`<div class="opts">
+          ${c.prompt ? html`<p class="opts-prompt">${c.prompt}</p>` : nothing}
+          ${opts.map(o => html`
+            <button class="opt" @click=${() => emit(o.action.event.name, o.action.event.context ?? {}, o.label)}>
+              ${o.emoji ? html`<span class="opt-emoji">${o.emoji}</span>` : nothing}
+              <span class="opt-body">
+                <span class="opt-label">${o.label ?? html`<span class="text-shimmer"></span>`}</span>
+                ${o.rationale ? html`<span class="opt-rationale">${o.rationale}</span>` : nothing}
+              </span>
+            </button>`)}
+        </div>`;
+      }
+      function renderRichMessage(c, emit, headlineStreaming, rationaleStreaming) {
+        const t = c.recommendationType ?? 'strong';
+        const tagLabel = { strong:'STRONG TAKE', positive:'POSITIVE', lifestyle:'LIFESTYLE',
+          informational:'INFO', professional:'PROFESSIONAL', alternative:'ALTERNATIVE' }[t] ?? 'RECOMMENDATION';
+        return html`<div class="rich rich-${t}">
+          <div class="rich-meta">
+            <span class="rich-tag">${tagLabel}</span>
+            ${c.confidence ? html`<span class="rich-conf">${String(c.confidence).toUpperCase()} CONFIDENCE</span>` : nothing}
+          </div>
+          ${c.headline ? html`<h2 class="rich-headline">${c.headline}${headlineStreaming ? html`<span class="caret"></span>` : nothing}</h2>`
+            : html`<h2 class="rich-headline"><span class="text-shimmer"></span></h2>`}
+          ${c.rationale ? html`<p class="rich-rationale">${c.rationale}${rationaleStreaming ? html`<span class="caret"></span>` : nothing}</p>`
+            : html`<p class="rich-rationale"><span class="text-shimmer"></span></p>`}
+          <div class="rich-actions">
+            ${actionBtn(c.confirmAction, 'primary', emit)}
+            ${actionBtn(c.dismissAction, 'ghost', emit)}
+          </div>
+        </div>`;
+      }
+      function actionBtn(a, variant, emit) {
+        if (!a) return nothing;
+        const ready = a.label && a.event?.name;
+        return html`<button class="btn btn-${variant}" ?disabled=${!ready}
+          @click=${() => ready && emit(a.event.name, a.event.context ?? {}, a.label)}>
+          ${ready ? a.label : html`<span class="text-shimmer btnlabel"></span>`}
+        </button>`;
+      }
+
+      // ======================================================================
+      // SECTION 9 — App
+      // ======================================================================
+      class A2UIStarter extends LitElement {
+        static properties = { _tick: { state: true }, _composer: { state: true } };
+        static styles = css`
+          :host { display: flex; flex-direction: column; height: 100%; max-width: 720px; margin: 0 auto; }
+          header.top { padding: 16px 20px; border-bottom: 1px solid rgba(0,0,0,0.06); display: flex; align-items: center; justify-content: space-between; background: #fff; }
+          .brand { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+          .muted { font-size: 12px; color: #666; }
+          .transcript { flex: 1; overflow-y: auto; padding: 24px 20px 20px; }
+          .transcript-inner { display: flex; flex-direction: column; gap: 20px; }
+          .turn-user      { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 18px 18px 4px 18px; background: #111; color: #fff; }
+          .turn-userPill  { align-self: flex-end; max-width: 80%; padding: 8px 12px;  border-radius: 18px 18px 4px 18px; background: #e5e5e5; color: #111; font-style: italic; }
+          .thinking { display: flex; gap: 6px; padding: 10px 0; align-self: flex-start; }
+          .thinking span { width: 8px; height: 8px; border-radius: 50%; background: #bbb; animation: bounce 1.2s infinite; }
+          .thinking span:nth-child(2) { animation-delay: .15s; }
+          .thinking span:nth-child(3) { animation-delay: .30s; }
+          @keyframes bounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-5px); opacity: 1; } }
+          footer.bottom { border-top: 1px solid rgba(0,0,0,0.06); padding: 14px 20px; background: #fff; }
+          .composer { display: flex; gap: 8px; }
+          .composer input { flex: 1; padding: 12px 14px; border-radius: 12px; border: 1px solid #ddd; font: inherit; }
+          .composer button { padding: 12px 18px; border-radius: 12px; border: none; background: #111; color: #fff; cursor: pointer; font: inherit; }
+
+          .t-h1   { font-size: 26px; font-weight: 700; margin: 0; line-height: 1.2; }
+          .t-h2   { font-size: 19px; font-weight: 600; margin: 0; line-height: 1.3; }
+          .t-body { font-size: 15px; margin: 0; line-height: 1.55; color: #222; }
+          .btn { padding: 10px 16px; border-radius: 10px; border: none; cursor: pointer; font: inherit; font-weight: 500; font-size: 14px; }
+          .btn-primary { background: #111; color: #fff; }
+          .btn-ghost   { background: transparent; color: #111; text-decoration: underline; padding: 10px 0; }
+          .btn:disabled { opacity: .7; cursor: default; }
+          .card        { border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 16px; background: #fff; }
+          .card-title  { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+
+          .opts { display: flex; flex-direction: column; gap: 8px; }
+          .opts-prompt { margin: 0 0 4px; font-weight: 500; font-size: 14px; color: #555; }
+          .opt { display: flex; gap: 12px; text-align: left; padding: 14px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.08); background: #fff; cursor: pointer; font: inherit; }
+          .opt:hover { background: #f5f5f5; }
+          .opt-emoji { font-size: 20px; }
+          .opt-body { display: flex; flex-direction: column; gap: 2px; }
+          .opt-label { font-weight: 600; font-size: 14px; }
+          .opt-rationale { color: #666; font-size: 12.5px; line-height: 1.4; }
+
+          .rich { padding: 18px; border-radius: 16px; border: 1px solid; }
+          .rich-strong        { border-color: rgba(17,17,17,0.3); background: linear-gradient(135deg, rgba(17,17,17,0.10), rgba(17,17,17,0.02)); }
+          .rich-positive      { border-color: rgba(46,125,50,0.3); background: linear-gradient(135deg, rgba(46,125,50,0.10), rgba(46,125,50,0.02)); }
+          .rich-lifestyle     { border-color: rgba(230,81,0,0.3);  background: linear-gradient(135deg, rgba(230,81,0,0.10),  rgba(230,81,0,0.02)); }
+          .rich-informational { border-color: rgba(21,101,192,0.3); background: linear-gradient(135deg, rgba(21,101,192,0.10), rgba(21,101,192,0.02)); }
+          .rich-professional  { border-color: rgba(106,27,154,0.3); background: linear-gradient(135deg, rgba(106,27,154,0.10), rgba(106,27,154,0.02)); }
+          .rich-alternative   { border-color: rgba(173,20,87,0.3);  background: linear-gradient(135deg, rgba(173,20,87,0.10),  rgba(173,20,87,0.02)); }
+          .rich-meta { display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: .1em; margin-bottom: 10px; }
+          .rich-conf { color: #888; }
+          .rich-headline { font-size: 19px; font-weight: 700; margin: 0 0 8px; line-height: 1.25; }
+          .rich-rationale { font-size: 14px; line-height: 1.55; color: #333; margin: 0 0 14px; }
+          .rich-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+          /* RFC Proposal 1 — pending shimmer */
+          .text-shimmer { display: inline-block; height: 0.9em; border-radius: 4px;
+            width: 70%; background: linear-gradient(90deg, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0.14) 50%, rgba(0,0,0,0.06) 100%);
+            background-size: 200% 100%; animation: pulse 1.1s ease-in-out infinite; }
+          .text-shimmer.h1 { width: 280px; height: 1.1em; }
+          .text-shimmer.h2 { width: 200px; }
+          .text-shimmer.btnlabel { width: 90px; }
+          .pending-child { display: block; height: 18px; border-radius: 6px; background: linear-gradient(90deg, #eee 0%, #f5f5f5 50%, #eee 100%); background-size: 200% 100%; animation: pulse 1.2s ease-in-out infinite; }
+          @keyframes pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+          /* RFC Proposal 2 — streaming caret */
+          .caret { display: inline-block; width: 2px; height: 1em; background: #2e5cff; vertical-align: text-bottom; margin-left: 2px; animation: blink 0.5s step-end infinite alternate; }
+          @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+          .missing { color: #c00; font-family: "JetBrains Mono", monospace; font-size: 12px; }
+        `;
+
+        constructor() {
+          super();
+          this._tick = 0;
+          this._composer = '';
+          // Build skills map
+          const map = new Map();
+          for (const s of Object.values(SKILLS)) map.set(s.name, s);
+          // Prompt for API key if no proxy configured and none saved
+          let apiKey = '';
+          if (!PROXY_URL) {
+            apiKey = localStorage.getItem('a2ui_anthropic_key') || '';
+            if (!apiKey) {
+              apiKey = prompt('No proxy configured. Paste an Anthropic API key to run against api.anthropic.com directly (saved to localStorage; clear with console or refresh-reset).') || '';
+              if (apiKey) localStorage.setItem('a2ui_anthropic_key', apiKey);
+            }
+          }
+          this.runtime = new SkillRuntime({ skills: map, defaultSkillId: 'greeting', proxyUrl: PROXY_URL, apiKey });
+          this._unsub = this.runtime.subscribe(() => { this._tick++; });
+        }
+
+        connectedCallback() {
+          super.connectedCallback();
+          this.runtime.primeGreeting();
+          this._scrollTimer = setInterval(() => {
+            const t = this.renderRoot.querySelector('.transcript');
+            if (t) t.scrollTop = t.scrollHeight;
+          }, 120);
+        }
+        disconnectedCallback() {
+          super.disconnectedCallback();
+          this._unsub();
+          clearInterval(this._scrollTimer);
+        }
+
+        emit = (name, context, echoLabel) => this.runtime.handleUserEvent(name, context, echoLabel);
+
+        send() {
+          const t = this._composer.trim();
+          if (!t) return;
+          this.runtime.handleUserText(t);
+          this._composer = '';
+        }
+
+        render() {
+          return html`
+            <header class="top">
+              <div class="brand">A2UI Web Starter</div>
+              <div class="muted">client-side skills · Claude-powered${PROXY_URL ? ' · via proxy' : ' · direct'}</div>
+            </header>
+            <div class="transcript">
+              <div class="transcript-inner">
+                ${this.runtime.turns.map(t => this._renderTurn(t))}
+                ${this.runtime.lastError ? html`<p class="muted" style="color:#c00">${this.runtime.lastError}</p>` : nothing}
+              </div>
+            </div>
+            <footer class="bottom">
+              <div class="composer">
+                <input .value=${this._composer}
+                  @input=${(e) => this._composer = e.target.value}
+                  @keydown=${(e) => { if (e.key === 'Enter') this.send(); }}
+                  placeholder="Type anything…" />
+                <button @click=${() => this.send()}>Send</button>
+              </div>
+            </footer>
+          `;
+        }
+        _renderTurn(turn) {
+          if (turn.kind === 'user')      return html`<div class="turn-user">${turn.text}</div>`;
+          if (turn.kind === 'userPill')  return html`<div class="turn-userPill">${turn.label}</div>`;
+          if (turn.kind === 'thinking')  return html`<div class="thinking"><span></span><span></span><span></span></div>`;
+          // agent
+          const s = this.runtime.surfaces.get(turn.surfaceId);
+          if (!s?.components.has('root')) {
+            return html`<div class="thinking"><span></span><span></span><span></span></div>`;
+          }
+          return renderComponent('root', s, this.emit);
+        }
+      }
+      customElements.define('a2ui-starter', A2UIStarter);
+    </script>
+  </body>
+</html>

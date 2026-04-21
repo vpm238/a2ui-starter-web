@@ -1,0 +1,37 @@
+{
+  "$schema": "https://a2ui.org/schemas/host-manifest.draft.json",
+  "name": "a2ui-starter-web",
+  "version": "0.1.0",
+  "description": "Reference client-side A2UI host for the browser. Lit + client-side skills + Anthropic via Cloudflare Worker proxy. Parity with a2ui-starter-swiftui.",
+  "protocol": "a2ui/0.9",
+  "host_type": "client",
+  "provides": {
+    "renderers": [
+      { "platform": "web", "framework": "lit", "version": "3.x", "source": "web/index.html" }
+    ],
+    "catalogs": [
+      { "id": "a2ui/core@0.1", "components": ["Text", "Button", "Column", "Card", "OptionsGrid", "RichMessageCard"] }
+    ]
+  },
+  "requires": {
+    "protocol": ">=0.9",
+    "rfc_extensions": ["progressive-rendering/proposal-1", "progressive-rendering/proposal-2", "progressive-rendering/proposal-3"]
+  },
+  "bundled_skills": [
+    { "id": "greeting", "triggers": [],                 "description": "Static intake — no LLM call." },
+    { "id": "planner",  "triggers": ["want_plan"],      "description": "Break a goal into 3 concrete first steps." },
+    { "id": "decider",  "triggers": ["want_decision"],  "description": "Weigh two options. Take a position." },
+    { "id": "critic",   "triggers": ["want_feedback"],  "description": "One strong opinionated piece of feedback." }
+  ],
+  "llm": {
+    "providers": [
+      { "id": "anthropic", "model": "claude-sonnet-4-5", "endpoint": "cloudflare-worker-proxy" }
+    ],
+    "streaming": true,
+    "field_output_format": "xml-tags"
+  },
+  "notes": [
+    "Manifest shape is experimental. No host reads it today.",
+    "Proposed as a standard way for A2UI host apps to declare capabilities."
+  ]
+}

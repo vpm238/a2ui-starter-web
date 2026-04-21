@@ -1,0 +1,6 @@
+name = "a2ui-llm-proxy"
+main = "llm-proxy.js"
+compatibility_date = "2025-04-01"
+
+# Secret set via `wrangler secret put ANTHROPIC_API_KEY`
+# No variables needed.
