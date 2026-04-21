@@ -28,11 +28,16 @@
       // ======================================================================
       // Configuration — edit this for your own deploy.
       //
-      // If PROXY_URL is set, LLM calls POST to <PROXY_URL>/v1/messages so the
-      // API key stays in a Cloudflare Worker secret (see /proxy in this repo).
-      // If PROXY_URL is empty, the app tries direct Anthropic calls — requires
-      // a bearer token entered at runtime, which the starter will prompt for.
-      const PROXY_URL = window.A2UI_PROXY_URL || '';
+      // Resolution order for the LLM endpoint:
+      //   1. window.A2UI_PROXY_URL set explicitly (via inline <script>)
+      //   2. ?proxy= query-string override
+      //   3. Localhost default — if served from 127.0.0.1 / localhost, try the
+      //      local-proxy.py at :8787 (zero-setup demo path).
+      //   4. Empty — fall back to direct Anthropic with a prompted API key
+      //      stored in localStorage.
+      const urlOverride = new URLSearchParams(location.search).get('proxy');
+      const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
+      const PROXY_URL = window.A2UI_PROXY_URL || urlOverride || (isLocal ? 'http://localhost:8787' : '');
       const MODEL = 'claude-sonnet-4-5';
       // ======================================================================
 
