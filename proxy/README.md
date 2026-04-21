@@ -26,7 +26,7 @@ Wrangler prints the live URL (e.g. `https://a2ui-llm-proxy.<you>.workers.dev`).
 
 ## Point the web app at it
 
-In your fork/deploy of `/web/index.html`, edit the `<head>` to add:
+In your fork/deploy of `/index.html`, edit the `<head>` to add:
 
 ```html
 <script>window.A2UI_PROXY_URL = 'https://a2ui-llm-proxy.<you>.workers.dev';</script>

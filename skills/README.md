@@ -7,8 +7,9 @@ YAML frontmatter for the machine-readable parts, markdown body for the
 system prompt.
 
 Every skill file is loaded at app start by `loadSkillBundles()` in
-`web/index.html` (section 5). Add a new skill by dropping a new `.md`
-file here and adding its id to the `loadSkillBundles([...])` call.
+[`../index.html`](../index.html) (section 5). Add a new skill by
+dropping a new `.md` file here and adding its id to the
+`loadSkillBundles([...])` call.
 
 ## Frontmatter schema
 
@@ -86,14 +87,14 @@ All fields that accept a string also accept `{path: "/..."}` to bind to
 the surface's data model. All `action.event.name` must be a string at
 dispatch time; it can be streamed in as a path binding too.
 
-The full zod schemas live inline at the top of `web/index.html` (Section 1).
-Invalid shapes are rejected by the `MessageProcessor` at `processMessages`
-time with a detailed zod error.
+The full zod schemas live inline at the top of [`../index.html`](../index.html)
+(Section 1). Invalid shapes are rejected by the `MessageProcessor` at
+`processMessages` time with a detailed zod error.
 
 ## Adding a new skill
 
-1. Create `web/skills/my-skill.md` with frontmatter + body.
-2. Register it in the `loadSkillBundles([...])` call in `web/index.html`.
+1. Create `skills/my-skill.md` with frontmatter + body.
+2. Register it in the `loadSkillBundles([...])` call in `index.html`.
 3. Add an option in `greeting.md` (or elsewhere) whose `action.event.name`
    matches your skill's `triggers`.
 4. Reload — no build step.

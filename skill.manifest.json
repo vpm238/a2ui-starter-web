@@ -7,7 +7,7 @@
   "host_type": "client",
   "provides": {
     "renderers": [
-      { "platform": "web", "framework": "lit", "version": "3.x", "source": "web/index.html" }
+      { "platform": "web", "framework": "lit", "version": "3.x", "source": "index.html" }
     ],
     "catalogs": [
       {

@@ -84,7 +84,7 @@
       //   starterCatalog = basicCatalog(18) + OptionsGrid + RichMessageCard
       //   All three packages are loaded from esm.sh — no bundler.
       //
-      //   Skills live as SKILL.md files in /web/skills/. Catalog schemas
+      //   Skills live as SKILL.md files in /skills/. Catalog schemas
       //   live inline here (zod) since the renderer needs the zod objects
       //   at runtime.
       //
@@ -481,7 +481,7 @@ replace them with your actual content.`;
       // SECTION 5 — SKILL.md loader
       //
       // Skills are real .md files with YAML frontmatter (matches Anthropic's
-      // SKILL.md open standard). One file per skill in /web/skills/.
+      // SKILL.md open standard). One file per skill in /skills/.
       // ==================================================================
       function parseSkillMarkdown(md) {
         const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md);

@@ -8,7 +8,7 @@ Companion to [`a2ui-starter-swiftui`](https://github.com/vpm238/a2ui-starter-swi
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ web/index.html  (self-contained, no build step)              │
+│ index.html  (self-contained, no build step)                  │
 │                                                              │
 │   ┌─────────────────────────────────────────────────────┐    │
 │   │  A2UIStarter  (Lit element — chat shell)             │    │
@@ -71,7 +71,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 python3 proxy/local-proxy.py
 
 # Terminal 2 — static server on :5173
-python3 -m http.server 5173 --directory web
+python3 -m http.server 5173
 # Open http://localhost:5173
 ```
 
@@ -80,7 +80,7 @@ The app auto-detects localhost and routes LLM calls through `http://localhost:87
 ## Quick run (no proxy, direct Anthropic)
 
 ```bash
-python3 -m http.server 5173 --directory web
+python3 -m http.server 5173
 # Open http://localhost:5173
 # First load: prompt for API key → stored in localStorage
 # Clear with `localStorage.clear()` in DevTools when done
@@ -97,17 +97,17 @@ python3 -m http.server 5173 --directory web
    # Copy the printed URL, e.g. https://a2ui-llm-proxy.you.workers.dev
    ```
 
-2. **Point the web app at the proxy.** At the top of `web/index.html`, inside `<head>`, add:
+2. **Point the web app at the proxy.** At the top of `index.html`, inside `<head>`, add:
    ```html
    <script>window.A2UI_PROXY_URL = 'https://a2ui-llm-proxy.you.workers.dev';</script>
    ```
 
 3. **Enable GitHub Pages** at `Settings → Pages`:
    - Source: **Deploy from a branch**
-   - Branch: `main`, folder: `/web`
+   - Branch: `main`, folder: `/` (root)
    - Save
 
-~60 seconds later, your starter is live at `https://vpm238.github.io/a2ui-starter-web/`.
+~60 seconds later, your starter is live at `https://<you>.github.io/a2ui-starter-web/`.
 
 ## The starter catalog
 
@@ -121,13 +121,13 @@ starterCatalog = new Catalog('a2ui-starter/core@0.1', [
 
 basicCatalog ships: `Text`, `Button`, `TextField`, `Row`, `Column`, `List`, `Image`, `Icon`, `Video`, `AudioPlayer`, `Card`, `Divider`, `CheckBox`, `Slider`, `DateTimeInput`, `ChoicePicker`, `Tabs`, `Modal`.
 
-Our two extensions add UX patterns the basic set doesn't cover: a stacked list where each row fires an event (common for agent intake) and a strong-take recommendation card. Both are full-fidelity A2UI components — schema-validated, data-bound, action-dispatching — defined inline in `web/index.html` (sections 1 & 2, ~110 lines each).
+Our two extensions add UX patterns the basic set doesn't cover: a stacked list where each row fires an event (common for agent intake) and a strong-take recommendation card. Both are full-fidelity A2UI components — schema-validated, data-bound, action-dispatching — defined inline in `index.html` (sections 1 & 2, ~110 lines each).
 
 See the **Kitchen sink** button in the running app for a live render of all 20 components.
 
 ## Skills
 
-Four LLM-backed skills + one static kitchen sink, all in [`web/skills/`](./web/skills/) as SKILL.md files (YAML frontmatter + markdown body):
+Four LLM-backed skills + one static kitchen sink, all in [`skills/`](./skills/) as SKILL.md files (YAML frontmatter + markdown body):
 
 | Skill | Trigger | What it does |
 |---|---|---|
@@ -139,7 +139,7 @@ Four LLM-backed skills + one static kitchen sink, all in [`web/skills/`](./web/s
 
 The frontmatter's `first_turn_skeleton.components` is the initial A2UI component tree. `first_turn_fill_fields` names the data-model paths Claude streams into. The markdown body below the fence is the skill's system prompt.
 
-See [`web/skills/README.md`](./web/skills/README.md) for the format spec.
+See [`skills/README.md`](./skills/README.md) for the format spec.
 
 ## Streaming strategy
 
@@ -150,26 +150,25 @@ RFC Proposal 3's `append` patch op would be more efficient on the wire — the o
 ## Project layout
 
 ```
-a2ui-starter-web/
-├── README.md                 # you are here
-├── LICENSE                   # MIT
-├── skill.manifest.json       # experimental host manifest
+a2ui-starter-web/              # repo root is also GH Pages root
+├── README.md                  # you are here
+├── LICENSE                    # MIT
+├── index.html                 # the whole app (~930 lines)
+├── official-test.html         # standalone 5-step renderer sanity check
+├── skill.manifest.json        # experimental host manifest
+├── skills/                    # SKILL.md per skill, loaded at runtime
+│   ├── README.md              # SKILL.md format
+│   ├── greeting.md            # intake — no LLM call
+│   ├── planner.md             # → 3 ordered steps
+│   ├── decider.md             # → two-option comparison
+│   ├── critic.md              # → strong-take card
+│   └── kitchen.md             # static kitchen sink
 ├── catalog/
-│   └── catalog.json          # reference schema for the extension components
-├── web/                      # GH Pages root
-│   ├── index.html            # the whole app (~920 lines)
-│   ├── official-test.html    # standalone 5-step renderer sanity check
-│   └── skills/
-│       ├── README.md         # SKILL.md format
-│       ├── greeting.md       # intake — no LLM call
-│       ├── planner.md        # → 3 ordered steps
-│       ├── decider.md        # → two-option comparison
-│       ├── critic.md         # → strong-take card
-│       └── kitchen.md        # static kitchen sink
-└── proxy/                    # Anthropic proxy
+│   └── catalog.json           # reference schema for the extension components
+└── proxy/                     # Anthropic proxy
     ├── README.md
-    ├── llm-proxy.js          # Cloudflare Worker (deploy with wrangler)
-    ├── local-proxy.py        # zero-dep local dev
+    ├── llm-proxy.js           # Cloudflare Worker (deploy with wrangler)
+    ├── local-proxy.py         # zero-dep local dev
     └── wrangler.toml
 ```
 

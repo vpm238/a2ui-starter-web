@@ -3,7 +3,7 @@
   "catalogId": "a2ui-starter/core@0.1",
   "version": "0.2.0",
   "title": "A2UI Starter Catalog v0.2",
-  "description": "Catalog used by a2ui-starter-web. Extends Google's official basic_catalog with two custom components (OptionsGrid, RichMessageCard). The live zod schemas for the extensions are defined inline at the top of web/index.html; this JSON file is a human-readable reference mirroring that shape.",
+  "description": "Catalog used by a2ui-starter-web. Extends Google's official basic_catalog with two custom components (OptionsGrid, RichMessageCard). The live zod schemas for the extensions are defined inline at the top of index.html; this JSON file is a human-readable reference mirroring that shape.",
   "extends": "https://a2ui.org/specification/v0_9/basic_catalog.json",
   "basic_catalog_components": [
     "Text", "Button", "TextField", "Row", "Column", "List", "Image", "Icon",
