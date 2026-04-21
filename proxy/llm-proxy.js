@@ -15,9 +15,13 @@
  *      to that URL before the module script runs.
  */
 
+// Lock this to your own deploy origins. '*' means anyone can hit the proxy
+// and burn your Anthropic quota — fine for local dev, bad for public demos.
+// The origin is scheme+host+port; paths don't matter for CORS.
 const ALLOWED_ORIGINS = [
-  // Add your GitHub Pages URL here (or '*' during local dev).
-  '*',
+  'https://vpm238.github.io',       // GitHub Pages deploy
+  'http://localhost:5173',          // `python3 -m http.server 5173`
+  'http://127.0.0.1:5173',
 ];
 
 function cors(origin) {

@@ -37,6 +37,13 @@
   <body>
     <div id="app"><a2ui-starter></a2ui-starter></div>
 
+    <!--
+      Deployed proxy URL. Forks should edit this (or delete the line to fall
+      back to the localhost default, or set window.A2UI_PROXY_URL elsewhere).
+      Keeps the ANTHROPIC_API_KEY on the Cloudflare Worker, not in the browser.
+    -->
+    <script>window.A2UI_PROXY_URL = 'https://a2ui-llm-proxy.vpm238.workers.dev';</script>
+
     <script type="importmap">
     { "imports": {
         "lit": "https://esm.sh/lit@3.2.0",
