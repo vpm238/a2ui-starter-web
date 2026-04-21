@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A2UI Official Renderer Test</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 20px; max-width: 680px; margin: 0 auto; }
+      h1 { font-size: 18px; font-weight: 600; }
+      .step { padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 12px; background: #fff; }
+      .step h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; letter-spacing: .02em; text-transform: uppercase; color: #666; }
+      .status { font-family: ui-monospace, monospace; font-size: 12px; color: #444; white-space: pre-wrap; }
+      .ok { color: #2e7d32; }
+      .err { color: #c00; }
+      .surface-box { border: 2px dashed #2e5cff; border-radius: 8px; padding: 12px; min-height: 60px; background: #f8fbff; }
+      button { padding: 6px 12px; margin-right: 6px; border: 1px solid #ddd; border-radius: 6px; background: #fff; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>A2UI official renderer — incremental proof</h1>
+    <p style="font-size: 13px; color: #555;">
+      Each step below bootstraps one more piece of the official <code>@a2ui/web_core</code> + <code>@a2ui/lit</code> stack
+      and renders inside the blue-bordered box. If a step fails, its status line shows the error.
+    </p>
+
+    <div class="step" id="s1">
+      <h2>Step 1 — Can we import the packages?</h2>
+      <div class="status" id="s1-status">…</div>
+    </div>
+
+    <div class="step" id="s2">
+      <h2>Step 2 — Render a single Text component</h2>
+      <div class="status" id="s2-status">…</div>
+      <div class="surface-box"><a2ui-surface id="surface-2"></a2ui-surface></div>
+    </div>
+
+    <div class="step" id="s3">
+      <h2>Step 3 — Render a Column with Text + Button; button click logs to console</h2>
+      <div class="status" id="s3-status">…</div>
+      <div class="surface-box"><a2ui-surface id="surface-3"></a2ui-surface></div>
+      <div id="s3-events" class="status"></div>
+    </div>
+
+    <div class="step" id="s4">
+      <h2>Step 4 — Path bindings: text bound to /greeting updates live</h2>
+      <div class="status" id="s4-status">…</div>
+      <div class="surface-box"><a2ui-surface id="surface-4"></a2ui-surface></div>
+      <button id="s4-update">Update data model /greeting</button>
+    </div>
+
+    <div class="step" id="s5">
+      <h2>Step 5 — Nested Card wrapping a Column with mixed children</h2>
+      <div class="status" id="s5-status">…</div>
+      <div class="surface-box"><a2ui-surface id="surface-5"></a2ui-surface></div>
+    </div>
+
+    <script type="importmap">
+    { "imports": {
+        "lit": "https://esm.sh/lit@3.2.0",
+        "@a2ui/web_core/v0_9": "https://esm.sh/@a2ui/web_core@0.9.2/v0_9",
+        "@a2ui/lit/v0_9": "https://esm.sh/@a2ui/lit@0.9.3/v0_9"
+    } }
+    </script>
+
+    <script type="module">
+      const setStatus = (id, text, cls = '') => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.className = 'status ' + cls;
+      };
+
+      let MessageProcessor, basicCatalog;
+      try {
+        const wc = await import('@a2ui/web_core/v0_9');
+        const al = await import('@a2ui/lit/v0_9');
+        // Side-effect import registers <a2ui-surface> and the basicCatalog custom elements.
+        MessageProcessor = wc.MessageProcessor;
+        basicCatalog = al.basicCatalog;
+        setStatus('s1-status',
+          `OK. web_core: ${Object.keys(wc).length} exports. @a2ui/lit: ${Object.keys(al).length} exports. basicCatalog.id = ${basicCatalog.id}`,
+          'ok');
+      } catch (e) {
+        setStatus('s1-status', `FAILED: ${e.message}\n${e.stack ?? ''}`, 'err');
+        throw e;
+      }
+
+      // --- Step 2 — single Text ---
+      try {
+        const p = new MessageProcessor([basicCatalog]);
+        p.processMessages([
+          { version: 'v0.9', createSurface: { surfaceId: 'test', catalogId: basicCatalog.id } },
+          { version: 'v0.9', updateComponents: { surfaceId: 'test', components: [
+            { id: 'root', component: 'Text', text: 'Hello from the official @a2ui/lit renderer' },
+          ] } },
+        ]);
+        const el = document.getElementById('surface-2');
+        el.surface = p.model.getSurface('test');
+        setStatus('s2-status', `OK. Text component should be rendered above. Surface id: ${p.model.getSurface('test')?.id}`, 'ok');
+      } catch (e) {
+        setStatus('s2-status', `FAILED: ${e.message}`, 'err');
+      }
+
+      // --- Step 3 — Column + Button (action) ---
+      try {
+        const events = [];
+        const p = new MessageProcessor([basicCatalog], async (action) => {
+          events.push(action);
+          const sink = document.getElementById('s3-events');
+          sink.textContent = 'action received: ' + JSON.stringify(action, null, 2);
+        });
+        p.processMessages([
+          { version: 'v0.9', createSurface: { surfaceId: 't3', catalogId: basicCatalog.id } },
+          { version: 'v0.9', updateComponents: { surfaceId: 't3', components: [
+            { id: 'hdr',   component: 'Text', text: 'Tap the button ↓', variant: 'h2' },
+            { id: 'btnlabel', component: 'Text', text: 'Click me' },
+            { id: 'btn',   component: 'Button', child: 'btnlabel', variant: 'primary',
+              action: { event: { name: 'demo_click', context: { source: 'step3' } } } },
+            { id: 'root',  component: 'Column', children: ['hdr', 'btn'] },
+          ] } },
+        ]);
+        document.getElementById('surface-3').surface = p.model.getSurface('t3');
+        setStatus('s3-status', 'OK. Column with Text + Button rendered; tap to see action event.', 'ok');
+      } catch (e) {
+        setStatus('s3-status', `FAILED: ${e.message}`, 'err');
+      }
+
+      // --- Step 4 — path bindings + live updateDataModel ---
+      try {
+        const p = new MessageProcessor([basicCatalog]);
+        p.processMessages([
+          { version: 'v0.9', createSurface: { surfaceId: 't4', catalogId: basicCatalog.id } },
+          { version: 'v0.9', updateDataModel: { surfaceId: 't4', value: { greeting: 'Hello, world.' } } },
+          { version: 'v0.9', updateComponents: { surfaceId: 't4', components: [
+            { id: 'root', component: 'Text', text: { path: '/greeting' }, variant: 'h2' },
+          ] } },
+        ]);
+        document.getElementById('surface-4').surface = p.model.getSurface('t4');
+        setStatus('s4-status', 'OK. Text is bound to /greeting. Click the button to change it.', 'ok');
+        document.getElementById('s4-update').addEventListener('click', () => {
+          const msg = new Date().toLocaleTimeString() + ' · updated from button';
+          p.processMessages([
+            { version: 'v0.9', updateDataModel: { surfaceId: 't4', path: '/greeting', value: msg } },
+          ]);
+        });
+      } catch (e) {
+        setStatus('s4-status', `FAILED: ${e.message}`, 'err');
+      }
+
+      // --- Step 5 — Card with Column child + mixed children ---
+      try {
+        const p = new MessageProcessor([basicCatalog]);
+        p.processMessages([
+          { version: 'v0.9', createSurface: { surfaceId: 't5', catalogId: basicCatalog.id } },
+          { version: 'v0.9', updateComponents: { surfaceId: 't5', components: [
+            { id: 'title',  component: 'Text', text: 'A card with a headline and body', variant: 'h2' },
+            { id: 'body',   component: 'Text', text: 'This is body copy inside a Card. basicCatalog Cards wrap a single child — for multiple children, nest them in a Column.', variant: 'body' },
+            { id: 'inner',  component: 'Column', children: ['title', 'body'] },
+            { id: 'card',   component: 'Card', child: 'inner' },
+            { id: 'root',   component: 'Column', children: ['card'] },
+          ] } },
+        ]);
+        document.getElementById('surface-5').surface = p.model.getSurface('t5');
+        setStatus('s5-status', 'OK. Card with Column + 2 Text children rendered.', 'ok');
+      } catch (e) {
+        setStatus('s5-status', `FAILED: ${e.message}`, 'err');
+      }
+    </script>
+  </body>
+</html>
