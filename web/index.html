@@ -3,13 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>A2UI Web Starter — client-side skills, LLM via proxy</title>
-    <meta name="description" content="Reference client-side A2UI host for the browser. Lit + client-side skills + Anthropic via a thin proxy. Zero bundler, zero backend state." />
+    <title>A2UI Web Starter — official renderer, custom catalog, client-side skills</title>
+    <meta name="description" content="Reference client-side A2UI host. Uses @a2ui/web_core MessageProcessor and @a2ui/lit renderer, extended with two custom components. Skills in SKILL.md; Claude via thin proxy." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" />
     <style>
       html, body { margin: 0; padding: 0; height: 100%; font-family: Inter, system-ui, sans-serif; background: #fafafa; color: #111; }
       #app { height: 100%; }
+
+      /* A2UI renderer uses CSS custom properties — set them app-wide so both
+         basicCatalog components and our extensions pick up the same palette. */
+      :root {
+        --a2ui-font-family: Inter, system-ui, sans-serif;
+        --a2ui-font-family-title: Inter, system-ui, sans-serif;
+        --a2ui-color-background: #ffffff;
+        --a2ui-color-on-background: #111111;
+        --a2ui-color-primary: #111111;
+        --a2ui-color-on-primary: #ffffff;
+        --a2ui-color-secondary: #f5f5f5;
+        --a2ui-color-on-secondary: #111111;
+        --a2ui-color-border: rgba(0,0,0,0.08);
+        --a2ui-color-accent: #2e5cff;
+        --a2ui-border-radius: 10px;
+        --a2ui-border-width: 1px;
+        --a2ui-spacing-xs: 4px;
+        --a2ui-spacing-s: 8px;
+        --a2ui-spacing-m: 12px;
+        --a2ui-spacing-l: 16px;
+        --a2ui-spacing-xl: 24px;
+      }
     </style>
   </head>
   <body>
@@ -19,121 +41,293 @@
     { "imports": {
         "lit": "https://esm.sh/lit@3.2.0",
         "lit/decorators.js": "https://esm.sh/lit@3.2.0/decorators.js",
+        "@a2ui/web_core/v0_9": "https://esm.sh/@a2ui/web_core@0.9.2/v0_9",
+        "@a2ui/lit/v0_9": "https://esm.sh/@a2ui/lit@0.9.3/v0_9",
+        "zod": "https://esm.sh/zod@3.25.76",
         "js-yaml": "https://esm.sh/js-yaml@4.1.0"
     } }
     </script>
 
     <script type="module">
+      // ==================================================================
+      // A2UI Web Starter — architecture at a glance
+      //
+      //   +-----------------------------------------------------------+
+      //   |   A2UIStarter (Lit)  — chat shell: transcript + composer  |
+      //   +-----------------------------------------------------------+
+      //                           |
+      //                           v
+      //   +-----------------------------------------------------------+
+      //   |   SkillRuntime        — routes events to skills, drives  |
+      //   |                         LLM streaming, emits v0.9 msgs   |
+      //   +-----------------------------------------------------------+
+      //                           |  processMessages([...])
+      //                           v
+      //   +-----------------------------------------------------------+
+      //   |   @a2ui/web_core MessageProcessor — state machine,        |
+      //   |   validates against starterCatalog (zod), owns surfaces.  |
+      //   +-----------------------------------------------------------+
+      //                           |  renders via
+      //                           v
+      //   +-----------------------------------------------------------+
+      //   |   <a2ui-surface>  — from @a2ui/lit. Recursively renders   |
+      //   |   components registered in starterCatalog.                |
+      //   +-----------------------------------------------------------+
+      //
+      //   starterCatalog = basicCatalog(18) + OptionsGrid + RichMessageCard
+      //   All three packages are loaded from esm.sh — no bundler.
+      //
+      //   Skills live as SKILL.md files in /web/skills/. Catalog schemas
+      //   live inline here (zod) since the renderer needs the zod objects
+      //   at runtime.
+      //
+      //   Every message produced by the SkillRuntime is also appended
+      //   to a wire-log panel so you can watch the A2UI protocol flow
+      //   live while the app runs.
+      // ==================================================================
+
       import { LitElement, css, html, nothing } from 'lit';
+      import { customElement } from 'lit/decorators.js';
+      import { MessageProcessor, Catalog } from '@a2ui/web_core/v0_9';
+      // Importing the package registers the <a2ui-surface> custom element
+      // and all of basicCatalog's element classes via their @customElement
+      // decorators. No explicit customElements.define() calls needed.
+      import { A2uiLitElement, A2uiController, basicCatalog } from '@a2ui/lit/v0_9';
+      import { z } from 'zod';
       import yaml from 'js-yaml';
 
-      // ======================================================================
-      // Configuration — edit this for your own deploy.
-      //
-      // Resolution order for the LLM endpoint:
-      //   1. window.A2UI_PROXY_URL set explicitly (via inline <script>)
-      //   2. ?proxy= query-string override
-      //   3. Localhost default — if served from 127.0.0.1 / localhost, try the
-      //      local-proxy.py at :8787 (zero-setup demo path).
-      //   4. Empty — fall back to direct Anthropic with a prompted API key
-      //      stored in localStorage.
+      // ==================================================================
+      // Configuration
+      // ==================================================================
       const urlOverride = new URLSearchParams(location.search).get('proxy');
       const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
       const PROXY_URL = window.A2UI_PROXY_URL || urlOverride || (isLocal ? 'http://localhost:8787' : '');
       const MODEL = 'claude-sonnet-4-5';
 
-      // Client-side typewriter smoothing. Anthropic SSE delivers text in
-      // big chunks (30–150 chars each). That's technically streaming but
-      // visually lands as "pops". When > 0, we split each chunk into
-      // single-char appends paced at this rate, which feels like typing.
-      // Set to 0 to disable and pass chunks through unchanged.
-      // Override via ?smooth=N in URL.
+      // Client-side typewriter smoothing. Anthropic SSE delivers text in big
+      // chunks (30–150 chars each). When > 0, we split each chunk into
+      // shorter updateDataModel sets paced at this rate, which feels like
+      // typing instead of popping. Set 0 to disable. Override via ?smooth=N.
       const SMOOTH_CPS = Number(new URLSearchParams(location.search).get('smooth') ?? '220');
-      // ======================================================================
+      const STARTER_CATALOG_ID = 'a2ui-starter/core@0.1';
 
-      // ======================================================================
-      // SECTION 1 — JSON Pointer + path binding resolution
-      // (mirrors a2ui-swiftui's Core/Bindings.swift)
-      // ======================================================================
-      function resolvePointer(root, pointer) {
-        if (!pointer || pointer === '/' || pointer === '') return root;
-        const parts = pointer.startsWith('/') ? pointer.slice(1).split('/') : pointer.split('/');
-        let c = root;
-        for (const k of parts) {
-          if (c == null || typeof c !== 'object') return undefined;
-          c = c[k];
-        }
-        return c;
-      }
-      function setPointer(root, pointer, value) {
-        const parts = pointer.startsWith('/') ? pointer.slice(1).split('/') : pointer.split('/');
-        let c = root;
-        for (let i = 0; i < parts.length - 1; i++) {
-          const k = parts[i];
-          if (typeof c[k] !== 'object' || c[k] === null) c[k] = {};
-          c = c[k];
-        }
-        c[parts[parts.length - 1]] = value;
-      }
-      function resolveBindings(v, dm) {
-        if (v == null || typeof v !== 'object') return v;
-        if (Array.isArray(v)) return v.map(x => resolveBindings(x, dm));
-        if (typeof v.path === 'string' && Object.keys(v).length === 1) return resolvePointer(dm, v.path);
-        const out = {};
-        for (const [k, val] of Object.entries(v)) out[k] = resolveBindings(val, dm);
-        return out;
-      }
+      // ==================================================================
+      // SECTION 1 — Custom catalog extensions
+      //
+      // Two components the basicCatalog doesn't ship: OptionsGrid (tap-to-
+      // fire events) and RichMessageCard (opinionated recommendation card).
+      // Each one is:
+      //   * A zod schema for validation + auto-binding by GenericBinder
+      //   * A Lit element extending A2uiLitElement
+      //   * An exported { name, schema, tagName } descriptor for the Catalog
+      //
+      // The controller auto-resolves {path: '/...'} bindings and converts
+      // any union containing `{event: {name, context}}` into a callable
+      // function that dispatches through the surface.
+      // ==================================================================
 
-      // ======================================================================
-      // SECTION 2 — SurfaceState (components + data model + streaming path)
-      // Implements RFC Proposals 2 (streaming flag) and 3 (append patch op)
-      // ======================================================================
-      class SurfaceState {
-        constructor(id) {
-          this.id = id;
-          this.components = new Map();
-          this.dataModel = {};
-          this.activeStreamingPath = null;
-        }
-        applyComponents(components) {
-          for (const c of components) {
-            if (c && typeof c === 'object' && c.id) this.components.set(c.id, c);
+      // Reusable primitives — mirror shapes from @a2ui/web_core/basic_catalog
+      // so path bindings and event actions work identically.
+      const PathBinding = z.object({ path: z.string() });
+      const DynString = z.union([z.string(), PathBinding]);
+      const EventAction = z.object({
+        event: z.object({
+          name: z.string(),
+          context: z.record(z.union([
+            z.string(), z.number(), z.boolean(),
+            z.array(z.any()), PathBinding,
+          ])).optional(),
+        }),
+      });
+      // Wrapping in a union is how the binder detects "this is an Action
+      // field" — scrapeSchemaBehavior() looks for a ZodUnion whose options
+      // include an object with an `event` shape.
+      const ActionSchema = z.union([EventAction]);
+
+      // ---- OptionsGrid -------------------------------------------------
+      // Stacked list of tappable options. Each option has a label,
+      // optional rationale, optional emoji, and a required action. Each
+      // option is auto-bound: label/rationale can be {path:...} bindings.
+      const OptionsGridApi = {
+        name: 'OptionsGrid',
+        schema: z.object({
+          prompt: DynString.optional(),
+          options: z.array(z.object({
+            id: z.string(),
+            label: DynString,
+            rationale: DynString.optional(),
+            emoji: z.string().optional(),
+            action: ActionSchema,
+          })),
+        }).strict(),
+      };
+
+      class A2uiOptionsGridElement extends A2uiLitElement {
+        static styles = css`
+          :host { display: block; margin: var(--a2ui-spacing-m, 12px) 0; }
+          .prompt { font: 500 14px/1.3 var(--a2ui-font-family, inherit); color: #555; margin: 0 0 8px; }
+          .list { display: flex; flex-direction: column; gap: 8px; }
+          .opt {
+            display: flex; gap: 12px; text-align: left;
+            padding: 14px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.08);
+            background: #fff; cursor: pointer; font: inherit; color: inherit;
           }
-        }
-        applyDataModel({ path, op = 'set', value = null, streaming = false }) {
-          const isRoot = !path || path === '/' || path === '';
-          switch (op) {
-            case 'set':
-              if (isRoot) this.dataModel = value ?? {};
-              else setPointer(this.dataModel, path, value);
-              break;
-            case 'append': {
-              const existing = isRoot ? this.dataModel : resolvePointer(this.dataModel, path);
-              const merged = this._append(existing, value);
-              if (isRoot) this.dataModel = merged;
-              else setPointer(this.dataModel, path, merged);
-              break;
-            }
-            case 'remove':
-              if (!isRoot) setPointer(this.dataModel, path, null);
-              break;
+          .opt:hover { background: #f5f5f5; }
+          .opt:disabled { opacity: 0.6; cursor: default; }
+          .emoji { font-size: 20px; line-height: 1.3; }
+          .body { display: flex; flex-direction: column; gap: 2px; }
+          .label { font: 600 14px/1.3 var(--a2ui-font-family, inherit); }
+          .rationale { color: #666; font-size: 12.5px; line-height: 1.4; }
+          .shimmer {
+            display: inline-block; height: 0.9em; min-width: 140px; border-radius: 4px;
+            background: linear-gradient(90deg, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0.14) 50%, rgba(0,0,0,0.06) 100%);
+            background-size: 200% 100%; animation: a2ui-pulse 1.1s ease-in-out infinite;
           }
-          if (streaming) this.activeStreamingPath = path ?? null;
-          else if (this.activeStreamingPath === path) this.activeStreamingPath = null;
-        }
-        isStreaming(path) { return this.activeStreamingPath === path; }
-        _append(existing, incoming) {
-          if (typeof existing === 'string' && typeof incoming === 'string') return existing + incoming;
-          if (Array.isArray(existing)) return [...existing, incoming];
-          if (existing == null) return incoming;
-          return incoming;
+          @keyframes a2ui-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        `;
+        createController() { return new A2uiController(this, OptionsGridApi); }
+        render() {
+          const props = this.controller.props;
+          if (!props) return nothing;
+          const opts = props.options ?? [];
+          return html`
+            ${props.prompt ? html`<p class="prompt">${props.prompt}</p>` : nothing}
+            <div class="list">
+              ${opts.map((o) => {
+                const ready = !!(o.label && o.action);
+                return html`
+                  <button class="opt" ?disabled=${!ready}
+                    @click=${() => ready && o.action()}>
+                    ${o.emoji ? html`<span class="emoji">${o.emoji}</span>` : nothing}
+                    <span class="body">
+                      <span class="label">${o.label ?? html`<span class="shimmer"></span>`}</span>
+                      ${o.rationale ? html`<span class="rationale">${o.rationale}</span>` : nothing}
+                    </span>
+                  </button>`;
+              })}
+            </div>`;
         }
       }
+      customElements.define('a2ui-options-grid', A2uiOptionsGridElement);
+      const A2uiOptionsGrid = { ...OptionsGridApi, tagName: 'a2ui-options-grid' };
 
-      // ======================================================================
+      // ---- RichMessageCard --------------------------------------------
+      // A strong-take recommendation card: headline + rationale + two
+      // actions (confirm / dismiss). Good for "here's my take, agree?".
+      const RichMessageCardApi = {
+        name: 'RichMessageCard',
+        schema: z.object({
+          recommendationType: z.enum(['strong', 'positive', 'lifestyle', 'informational', 'professional', 'alternative']).optional(),
+          confidence: z.enum(['low', 'medium', 'high']).optional(),
+          headline: DynString.optional(),
+          rationale: DynString.optional(),
+          confirmAction: z.object({
+            label: DynString,
+            event: z.object({
+              name: DynString,
+              context: z.record(z.any()).optional(),
+            }),
+          }).optional(),
+          dismissAction: z.object({
+            label: DynString,
+            event: z.object({
+              name: DynString,
+              context: z.record(z.any()).optional(),
+            }),
+          }).optional(),
+        }).strict(),
+      };
+
+      class A2uiRichMessageCardElement extends A2uiLitElement {
+        static styles = css`
+          :host { display: block; margin: var(--a2ui-spacing-m, 12px) 0; }
+          .card { padding: 18px; border-radius: 16px; border: 1px solid; font: inherit; }
+          .card-strong        { border-color: rgba(17,17,17,0.3); background: linear-gradient(135deg, rgba(17,17,17,0.10), rgba(17,17,17,0.02)); }
+          .card-positive      { border-color: rgba(46,125,50,0.3); background: linear-gradient(135deg, rgba(46,125,50,0.10), rgba(46,125,50,0.02)); }
+          .card-lifestyle     { border-color: rgba(230,81,0,0.3);  background: linear-gradient(135deg, rgba(230,81,0,0.10),  rgba(230,81,0,0.02)); }
+          .card-informational { border-color: rgba(21,101,192,0.3); background: linear-gradient(135deg, rgba(21,101,192,0.10), rgba(21,101,192,0.02)); }
+          .card-professional  { border-color: rgba(106,27,154,0.3); background: linear-gradient(135deg, rgba(106,27,154,0.10), rgba(106,27,154,0.02)); }
+          .card-alternative   { border-color: rgba(173,20,87,0.3);  background: linear-gradient(135deg, rgba(173,20,87,0.10),  rgba(173,20,87,0.02)); }
+          .meta { display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: .1em; margin-bottom: 10px; }
+          .conf { color: #888; }
+          .headline { font-size: 19px; font-weight: 700; margin: 0 0 8px; line-height: 1.25; }
+          .rationale { font-size: 14px; line-height: 1.55; color: #333; margin: 0 0 14px; }
+          .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+          .btn { padding: 10px 16px; border-radius: 10px; border: none; cursor: pointer; font: inherit; font-weight: 500; font-size: 14px; }
+          .btn-primary { background: #111; color: #fff; }
+          .btn-ghost { background: transparent; color: #111; text-decoration: underline; padding: 10px 0; }
+          .btn:disabled { opacity: 0.6; cursor: default; }
+          .shimmer {
+            display: inline-block; height: 1em; width: 70%; border-radius: 4px;
+            background: linear-gradient(90deg, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0.14) 50%, rgba(0,0,0,0.06) 100%);
+            background-size: 200% 100%; animation: a2ui-pulse 1.1s ease-in-out infinite;
+          }
+          @keyframes a2ui-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        `;
+        createController() { return new A2uiController(this, RichMessageCardApi); }
+        render() {
+          const props = this.controller.props;
+          if (!props) return nothing;
+          const t = props.recommendationType ?? 'strong';
+          const tagLabel = { strong:'STRONG TAKE', positive:'POSITIVE', lifestyle:'LIFESTYLE',
+            informational:'INFO', professional:'PROFESSIONAL', alternative:'ALTERNATIVE' }[t] ?? 'TAKE';
+          const confirmReady = !!(props.confirmAction?.label);
+          const dismissReady = !!(props.dismissAction?.label);
+          return html`
+            <div class="card card-${t}">
+              <div class="meta">
+                <span>${tagLabel}</span>
+                ${props.confidence ? html`<span class="conf">${String(props.confidence).toUpperCase()} CONFIDENCE</span>` : nothing}
+              </div>
+              <h2 class="headline">${props.headline ?? html`<span class="shimmer"></span>`}</h2>
+              <p class="rationale">${props.rationale ?? html`<span class="shimmer" style="width:90%"></span>`}</p>
+              <div class="actions">
+                ${props.confirmAction ? html`<button class="btn btn-primary" ?disabled=${!confirmReady}
+                  @click=${() => confirmReady && this._fire(props.confirmAction)}>${props.confirmAction.label ?? html`<span class="shimmer" style="width:60px"></span>`}</button>` : nothing}
+                ${props.dismissAction ? html`<button class="btn btn-ghost" ?disabled=${!dismissReady}
+                  @click=${() => dismissReady && this._fire(props.dismissAction)}>${props.dismissAction.label ?? html`<span class="shimmer" style="width:60px"></span>`}</button>` : nothing}
+              </div>
+            </div>`;
+        }
+        // confirmAction / dismissAction aren't detected as Actions by the
+        // binder (they're plain objects, not unions with `event`), so we
+        // dispatch manually through the surface.
+        _fire(action) {
+          const name = action.event?.name;
+          if (!name) return;
+          const surface = this.context?.dataContext?.surface;
+          if (!surface) return;
+          surface.dispatchAction({ event: { name, context: action.event.context ?? {} } }, 'RichMessageCard');
+        }
+      }
+      customElements.define('a2ui-rich-message-card', A2uiRichMessageCardElement);
+      const A2uiRichMessageCard = { ...RichMessageCardApi, tagName: 'a2ui-rich-message-card' };
+
+      // ==================================================================
+      // SECTION 2 — Build the starter catalog
+      //
+      // Extend basicCatalog's 18 components with our 2 extensions. The
+      // MessageProcessor uses this catalog to validate every updateComponents
+      // message: unknown component types or extra fields will throw.
+      // ==================================================================
+      const starterCatalog = new Catalog(
+        STARTER_CATALOG_ID,
+        [
+          ...Array.from(basicCatalog.components.values()),
+          A2uiOptionsGrid,
+          A2uiRichMessageCard,
+        ],
+        Array.from(basicCatalog.functions.values()),
+      );
+
+      // ==================================================================
       // SECTION 3 — FieldParser
-      // Port of Swift FieldParser — incrementally parses <field>text</field>
-      // ======================================================================
+      //
+      // Incremental XML-tag parser. The LLM is instructed to reply in
+      //   <field1>...</field1><field2>...</field2>
+      // shape; this parser emits per-field deltas as they stream in. Same
+      // algorithm as a2ui-skills-swiftui's FieldParser.swift.
+      // ==================================================================
       class FieldParser {
         constructor(fieldNames) {
           this.fieldNames = new Set(fieldNames);
@@ -173,9 +367,10 @@
                 this.lastEmitted = '';
                 continue;
               }
-              // Minimal hold-back: only reserve trailing chars that could
-              // be the *start* of the closing tag. Holding back closing.length-1
-              // unconditionally swallows real content when the tail isn't tag-like.
+              // Only hold back the trailing chars that could be the START of
+              // the closing tag — e.g. if closing is "</lbl>" and the buffer
+              // ends with "</l", hold those 3 chars; if it ends with "foo",
+              // hold nothing. Prevents swallowing real content.
               const maxHold = Math.min(closing.length - 1, this.buffer.length);
               let hold = 0;
               for (let h = maxHold; h >= 1; h--) {
@@ -210,9 +405,9 @@
         }
       }
 
-      // ======================================================================
-      // SECTION 4 — LLM providers
-      // ======================================================================
+      // ==================================================================
+      // SECTION 4 — LLM stream (Anthropic SSE → FieldParser deltas)
+      // ==================================================================
       async function* streamAnthropicViaProxy({ systemPrompt, userMessage, history, fields, proxyUrl, apiKey }) {
         const tagTemplate = fields
           .map(f => `<${f.name}>${f.description.trim()}</${f.name}>`)
@@ -269,28 +464,23 @@ replace them with your actual content.`;
               if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
                 for (const d of parser.feed(ev.delta.text)) yield d;
               }
-            } catch {/* ignore partial SSE lines */}
+            } catch {/* partial SSE line */}
           }
         }
         for (const d of parser.finish()) yield d;
       }
 
-      // ======================================================================
-      // SECTION 5 — SKILL.md + catalog loaders
+      // ==================================================================
+      // SECTION 5 — SKILL.md loader
       //
       // Skills are real .md files with YAML frontmatter (matches Anthropic's
-      // SKILL.md open standard). Catalog is JSON Schema at /catalog/catalog.json
-      // (matches Google's A2UI basic_catalog.json shape).
-      //
-      // Both loaded at app init via fetch(). The SkillRuntime is hydrated once
-      // the promises resolve.
-      // ======================================================================
+      // SKILL.md open standard). One file per skill in /web/skills/.
+      // ==================================================================
       function parseSkillMarkdown(md) {
         const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md);
         if (!m) throw new Error('SKILL.md missing frontmatter fence');
         const frontmatter = yaml.load(m[1]) || {};
         const body = m[2] || '';
-        // Normalize: skeleton components and fill_fields are what the runtime reads.
         const skill = {
           name: frontmatter.name,
           description: frontmatter.description || '',
@@ -318,186 +508,84 @@ replace them with your actual content.`;
         return map;
       }
 
-      async function loadCatalog() {
-        const resp = await fetch('../catalog/catalog.json');
-        if (!resp.ok) return null;
-        return await resp.json();
-      }
-
-      // ======================================================================
-      // SECTION 6 — (Removed) Inline skills
+      // ==================================================================
+      // SECTION 6 — SkillRuntime
       //
-      // Prior versions of this file defined skills as JS objects here. They
-      // now live as real SKILL.md files in /web/skills/{id}.md and are loaded
-      // at startup by loadSkillBundles() above. Keeping this section marker
-      // so the numbering lines up with the README walkthrough.
-      // ======================================================================
-      /* replaced — see /web/skills/ for the .md files */
-      const _SKILLS_REMOVED = {
-        greeting: {
-          name: 'greeting',
-          description: 'Static intake — no LLM call.',
-          triggers: [],
-          body: `# Greeting skill\n\nRoutes to one of three specialized skills.`,
-          skeleton: [
-            { id: 'hdr',   component: 'Text', variant: 'h1',
-              text: 'What can I help you think through?' },
-            { id: 'sub',   component: 'Text', variant: 'body',
-              text: 'A few honest starting points. Pick whichever is closest to what you need.' },
-            { id: 'choice', component: 'OptionsGrid', prompt: "I'm here to…",
-              options: [
-                { id: 'plan',     label: 'Make a plan',                   rationale: 'You know roughly what you want; you need structure to move forward.', emoji: '🗺️',
-                  action: { event: { name: 'want_plan',     context: {} } } },
-                { id: 'decide',   label: 'Decide between options',         rationale: 'Two or three paths; you want a blunt second opinion.',                emoji: '⚖️',
-                  action: { event: { name: 'want_decision', context: {} } } },
-                { id: 'feedback', label: 'Get honest feedback',            rationale: 'Draft, idea, or situation you want someone to cut through.',         emoji: '🎯',
-                  action: { event: { name: 'want_feedback', context: {} } } },
-              ]
-            },
-            { id: 'root', component: 'Column', children: ['hdr', 'sub', 'choice'], gap: 16 },
-          ],
-          fillFields: null,
-        },
-
-        planner: {
-          name: 'planner', description: 'Breaks goals into 3 concrete first steps.',
-          triggers: ['want_plan'],
-          body: `# Planner skill
-
-Turn any goal into 3 specific, ordered first steps. No generic "plan your day"
-advice — real steps a person can take today.
-
-## Voice
-Direct, specific, imperative. If the user's goal is fuzzy, pick a reasonable
-concrete interpretation and go.`,
-          skeleton: [
-            { id: 'intro', component: 'Text', variant: 'h2', text: { path: '/reply/intro' } },
-            { id: 'opts', component: 'OptionsGrid', prompt: 'Take it step by step:',
-              options: [
-                { id: 's1', label: { path: '/reply/step1_label' }, rationale: { path: '/reply/step1_rationale' }, emoji: '1️⃣', action: { event: { name: 'step_1_detail', context: {} } } },
-                { id: 's2', label: { path: '/reply/step2_label' }, rationale: { path: '/reply/step2_rationale' }, emoji: '2️⃣', action: { event: { name: 'step_2_detail', context: {} } } },
-                { id: 's3', label: { path: '/reply/step3_label' }, rationale: { path: '/reply/step3_rationale' }, emoji: '3️⃣', action: { event: { name: 'step_3_detail', context: {} } } },
-              ]
-            },
-            { id: 'root', component: 'Column', children: ['intro', 'opts'], gap: 14 },
-          ],
-          fillFields: [
-            { name: 'intro',            description: 'ONE sentence framing the plan. Ends with period.' },
-            { name: 'step1_label',      description: 'The first step. Imperative verb phrase (≤7 words).' },
-            { name: 'step1_rationale',  description: 'ONE sentence explaining why this is step 1.' },
-            { name: 'step2_label',      description: 'The second step.' },
-            { name: 'step2_rationale',  description: 'ONE sentence — why this follows step 1.' },
-            { name: 'step3_label',      description: 'The third step.' },
-            { name: 'step3_rationale',  description: 'ONE sentence — why this seals the early effort.' },
-          ],
-        },
-
-        decider: {
-          name: 'decider', description: 'Weighs two options. Takes a position.',
-          triggers: ['want_decision'],
-          body: `# Decider skill
-
-Weigh two options. Name each. Take a position. Don't hedge.
-
-## Voice
-Blunt. The whole value is a second opinion that commits.`,
-          skeleton: [
-            { id: 'hdr',    component: 'Text', variant: 'h2', text: { path: '/reply/headline' } },
-            { id: 'o1_txt', component: 'Text', variant: 'body', text: { path: '/reply/option1_take' } },
-            { id: 'o1',     component: 'Card', title: { path: '/reply/option1_name' }, child: 'o1_txt' },
-            { id: 'o2_txt', component: 'Text', variant: 'body', text: { path: '/reply/option2_take' } },
-            { id: 'o2',     component: 'Card', title: { path: '/reply/option2_name' }, child: 'o2_txt' },
-            { id: 'lean',   component: 'Text', variant: 'body', text: { path: '/reply/lean' } },
-            { id: 'root',   component: 'Column', children: ['hdr', 'o1', 'o2', 'lean'], gap: 14 },
-          ],
-          fillFields: [
-            { name: 'headline',     description: 'ONE sentence introducing the comparison.' },
-            { name: 'option1_name', description: 'Short name for the first option (≤6 words).' },
-            { name: 'option1_take', description: '1-2 sentences — honest take on option 1.' },
-            { name: 'option2_name', description: 'Short name for the second option.' },
-            { name: 'option2_take', description: '1-2 sentences — honest take on option 2.' },
-            { name: 'lean',         description: 'ONE sentence starting "My lean:" — commit to a direction.' },
-          ],
-        },
-
-        critic: {
-          name: 'critic', description: 'One strong opinionated piece of feedback.',
-          triggers: ['want_feedback'],
-          body: `# Critic skill
-
-Give one honest piece of feedback. No hedging sandwich.
-
-## Voice
-First person. Direct. If it has a real problem, say so. If it's good, say that.`,
-          skeleton: [
-            { id: 'rec', component: 'RichMessageCard',
-              recommendationType: 'strong', confidence: 'medium',
-              headline:  { path: '/reply/headline' },
-              rationale: { path: '/reply/rationale' },
-              confirmAction: { label: { path: '/reply/confirm_label' },
-                event: { name: { path: '/reply/confirm_event' }, context: {} } },
-              dismissAction: { label: { path: '/reply/dismiss_label' },
-                event: { name: { path: '/reply/dismiss_event' }, context: {} } },
-            },
-            { id: 'root', component: 'Column', children: ['rec'], gap: 12 },
-          ],
-          fillFields: [
-            { name: 'headline',      description: 'ONE direct sentence — your take. No hedging.' },
-            { name: 'rationale',     description: '2-3 sentences explaining the take.' },
-            { name: 'confirm_label', description: 'Short action button text (≤5 words).' },
-            { name: 'confirm_event', description: 'Event name snake_case: concrete_fix, show_example, tradeoffs.' },
-            { name: 'dismiss_label', description: 'Short dismiss text (≤5 words).' },
-            { name: 'dismiss_event', description: 'Event name snake_case. Usually `restart`.' },
-          ],
-        },
-      };
-
-      // ======================================================================
-      // SECTION 7 — SkillRuntime (orchestrator)
-      // ======================================================================
+      // Orchestrates the chat: routes user events to skills, streams LLM
+      // replies, emits A2UI v0.9 messages to the shared MessageProcessor.
+      // Every emitted message is also appended to a wire log so the devtools
+      // panel can show the protocol flow in real time.
+      // ==================================================================
       class SkillRuntime {
-        constructor({ skills, defaultSkillId, proxyUrl, apiKey = '' }) {
+        constructor({ skills, defaultSkillId, processor, proxyUrl, apiKey = '' }) {
           this.skills = skills;
           this.defaultSkillId = defaultSkillId;
           this.activeSkillId = defaultSkillId;
+          this.processor = processor;
           this.proxyUrl = proxyUrl;
           this.apiKey = apiKey;
-          this.surfaces = new Map();
-          this.turns = [];
+          this.turns = [];   // UI transcript
           this.history = [];
+          this.wireLog = []; // every v0.9 message emitted
           this.counter = 0;
           this.listeners = new Set();
           this.lastError = null;
-          // Wire log: records every A2UI message the runtime produces.
-          // Proves we're really speaking A2UI — the devtools panel surfaces this.
-          this.wireLog = [];
         }
 
-        _log(kind, payload) {
-          this.wireLog.push({ ts: Date.now(), msg: { version: 'v0.9', [kind]: payload } });
-          if (this.wireLog.length > 400) this.wireLog.splice(0, this.wireLog.length - 400);
-        }
         subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
         emit() { for (const l of this.listeners) l(); }
 
+        _send(msgs) {
+          for (const m of msgs) {
+            this.wireLog.push({ ts: Date.now(), msg: m });
+            if (this.wireLog.length > 400) this.wireLog.shift();
+          }
+          this.processor.processMessages(msgs);
+        }
+
+        primeSurface(skillId, surfaceId) {
+          const skill = this.skills.get(skillId);
+          if (!skill?.skeleton) return null;
+          this._send([
+            { version: 'v0.9', createSurface: { surfaceId, catalogId: STARTER_CATALOG_ID } },
+            { version: 'v0.9', updateComponents: { surfaceId, components: skill.skeleton } },
+          ]);
+          return surfaceId;
+        }
+
         primeGreeting() {
-          const greet = this.skills.get(this.defaultSkillId);
-          if (!greet?.skeleton) return;
-          const s = new SurfaceState('greeting');
-          this._log('createSurface', { surfaceId: 'greeting', catalogId: 'a2ui/core@0.1' });
-          this._log('updateComponents', { surfaceId: 'greeting', components: greet.skeleton });
-          s.applyComponents(greet.skeleton);
-          this.surfaces.set('greeting', s);
+          this.primeSurface(this.defaultSkillId, 'greeting');
           this.turns.push({ kind: 'agent', surfaceId: 'greeting' });
           this.emit();
         }
 
+        showKitchenSink() {
+          // Special-case: reset transcript to a single kitchen-sink surface.
+          const sid = `kitchen_${Date.now()}`;
+          this.primeSurface('kitchen', sid);
+          this.turns = [{ kind: 'agent', surfaceId: sid }];
+          this.emit();
+        }
+
         handleUserEvent(name, context = {}, echoLabel = null) {
+          // Restart closes the current conversation and re-primes greeting.
+          if (name === 'restart') {
+            this.turns = [];
+            this.activeSkillId = this.defaultSkillId;
+            this.history = [];
+            this.primeGreeting();
+            return;
+          }
+          if (name === 'show_kitchen_sink') {
+            this.showKitchenSink();
+            return;
+          }
           if (echoLabel) this.turns.push({ kind: 'userPill', label: echoLabel });
           this.turns.push({ kind: 'thinking', id: `t_${Date.now()}` });
           this.emit();
           this._processTurn({ userMessage: this._describeTap(name, context), eventName: name });
         }
+
         handleUserText(text) {
           this.turns.push({ kind: 'user', text });
           this.turns.push({ kind: 'thinking', id: `t_${Date.now()}` });
@@ -506,15 +594,13 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
         }
 
         _describeTap(name, ctx) {
-          const c = Object.keys(ctx).length ? ` with context ${JSON.stringify(ctx)}` : '';
+          const keys = Object.keys(ctx || {});
+          const c = keys.length ? ` with context ${JSON.stringify(ctx)}` : '';
           return `User tapped option: ${name}${c}.`;
         }
 
         async _processTurn({ userMessage, eventName }) {
-          // Route
-          if (eventName === 'restart') {
-            this.activeSkillId = this.defaultSkillId;
-          } else if (eventName) {
+          if (eventName) {
             for (const s of this.skills.values()) {
               if (s.triggers?.includes(eventName)) { this.activeSkillId = s.name; break; }
             }
@@ -524,30 +610,32 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
 
           this.counter++;
           const sid = `msg_${this.counter}`;
-          const surface = new SurfaceState(sid);
 
           if (skill.skeleton && skill.fillFields && skill.triggers.includes(eventName)) {
-            this._log('createSurface', { surfaceId: sid, catalogId: 'a2ui/core@0.1' });
-            this._log('updateComponents', { surfaceId: sid, components: skill.skeleton });
-            surface.applyComponents(skill.skeleton);
-            this.surfaces.set(sid, surface);
+            this._send([
+              { version: 'v0.9', createSurface: { surfaceId: sid, catalogId: STARTER_CATALOG_ID } },
+              { version: 'v0.9', updateDataModel: { surfaceId: sid, value: { reply: {} } } },
+              { version: 'v0.9', updateComponents: { surfaceId: sid, components: skill.skeleton } },
+            ]);
             this._replaceThinking(sid);
             this.emit();
-            await this._streamFill(skill, surface, userMessage, null, sid);
+            await this._streamFill(skill, sid, userMessage, null);
           } else {
+            // Fallback: single body paragraph via path binding.
             const fallback = [
-              { id: 'hdr', component: 'Text', variant: 'body', text: { path: '/reply/body' } },
-              { id: 'root', component: 'Column', children: ['hdr'] },
+              { id: 'body', component: 'Text', variant: 'body', text: { path: '/reply/body' } },
+              { id: 'root', component: 'Column', children: ['body'] },
             ];
-            this._log('createSurface', { surfaceId: sid, catalogId: 'a2ui/core@0.1' });
-            this._log('updateComponents', { surfaceId: sid, components: fallback });
-            surface.applyComponents(fallback);
-            this.surfaces.set(sid, surface);
+            this._send([
+              { version: 'v0.9', createSurface: { surfaceId: sid, catalogId: STARTER_CATALOG_ID } },
+              { version: 'v0.9', updateDataModel: { surfaceId: sid, value: { reply: { body: '' } } } },
+              { version: 'v0.9', updateComponents: { surfaceId: sid, components: fallback } },
+            ]);
             this._replaceThinking(sid);
             this.emit();
-            await this._streamFill(skill, surface, userMessage, [
+            await this._streamFill(skill, sid, userMessage, [
               { name: 'body', description: 'A direct, helpful reply. Plain prose, no markdown.' }
-            ], sid);
+            ]);
           }
           this.history.push({ role: 'user', text: userMessage });
         }
@@ -562,22 +650,22 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           this.turns.push({ kind: 'agent', surfaceId });
         }
 
-        async _streamFill(skill, surface, userMessage, fieldsOverride = null, surfaceId = null) {
+        async _streamFill(skill, surfaceId, userMessage, fieldsOverride) {
           const fields = fieldsOverride || skill.fillFields;
           const systemPrompt = skill.body;
           const finalVals = {};
-          const sid = surfaceId ?? surface.id;
           try {
             for await (const delta of streamAnthropicViaProxy({
               systemPrompt, userMessage, history: this.history, fields,
               proxyUrl: this.proxyUrl, apiKey: this.apiKey,
             })) {
-              const path = `/reply/${delta.fieldName}`;
-              const isStreaming = !delta.isFinal;
-              await this._applyChunkSmoothly({
-                surfaceId: sid, path, chunk: delta.chunkValue, streaming: isStreaming,
-              });
               finalVals[delta.fieldName] = delta.accumulatedValue;
+              await this._setSmoothly({
+                surfaceId,
+                path: `/reply/${delta.fieldName}`,
+                chunk: delta.chunkValue,
+                accumulated: delta.accumulatedValue,
+              });
             }
           } catch (e) {
             this.lastError = String(e.message || e);
@@ -587,307 +675,79 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           if (historyText) this.history.push({ role: 'assistant', text: historyText });
         }
 
-        // Apply a server chunk as N single-char appends paced by SMOOTH_CPS.
-        // Each sub-append uses RFC Proposal 3's append op + Proposal 2's
-        // streaming flag. Logs once per *server* chunk (not per char) to keep
-        // the wire log readable.
-        async _applyChunkSmoothly({ surfaceId, path, chunk, streaming }) {
+        // Emit updateDataModel with `set` for the growing accumulated string.
+        // RFC Proposal 3 ("append" op) would be nicer on the wire, but the
+        // official MessageProcessor only supports `set` — so we send the
+        // full value each tick. Client-side we split into char-paced sub-
+        // updates so the visual effect is a typewriter, not a jump.
+        async _setSmoothly({ surfaceId, path, chunk, accumulated }) {
           if (!chunk) return;
-          const surface = this.surfaces.get(surfaceId);
-          if (!surface) return;
-          // Log the aggregate chunk as a single wire entry (what the server
-          // actually sent over SSE). The per-char splits are client-side
-          // smoothing, not wire events.
-          this._log('updateDataModel', {
-            surfaceId, path, patch: 'append', value: chunk, streaming,
-          });
           if (SMOOTH_CPS <= 0) {
-            surface.applyDataModel({ path, op: 'append', value: chunk, streaming });
+            this._send([{ version: 'v0.9', updateDataModel: { surfaceId, path, value: accumulated } }]);
             this.emit();
             return;
           }
           const delayMs = Math.max(1, Math.floor(1000 / SMOOTH_CPS));
+          const startLen = accumulated.length - chunk.length;
           for (let i = 0; i < chunk.length; i++) {
-            const isLastChar = i === chunk.length - 1;
-            surface.applyDataModel({
-              path, op: 'append', value: chunk[i],
-              streaming: streaming || !isLastChar,
-            });
+            const partial = accumulated.slice(0, startLen + i + 1);
+            this._send([{ version: 'v0.9', updateDataModel: { surfaceId, path, value: partial } }]);
             this.emit();
-            if (!isLastChar) await new Promise(r => setTimeout(r, delayMs));
+            if (i < chunk.length - 1) await new Promise(r => setTimeout(r, delayMs));
           }
         }
       }
 
-      // ======================================================================
-      // SECTION 8 — A2UI renderer (component dispatch + SwiftUI-parity shapes)
-      // ======================================================================
-      function renderComponent(id, surface, emit) {
-        const raw = surface.components.get(id);
-        if (!raw) return html`<span class="pending-child"></span>`;
-        const resolved = resolveBindings(raw, surface.dataModel);
-        const textStreaming     = isStreamingBinding(raw.text, surface);
-        const headlineStreaming = isStreamingBinding(raw.headline, surface);
-        const rationaleStreaming = isStreamingBinding(raw.rationale, surface);
-        switch (resolved.component) {
-          case 'Column': {
-            const children = resolved.children ?? [];
-            const gap = resolved.gap ?? 12;
-            return html`<div style="display:flex;flex-direction:column;gap:${gap}px">
-              ${children.map(cid => renderComponent(cid, surface, emit))}
-            </div>`;
-          }
-          case 'Row': {
-            const children = resolved.children ?? [];
-            const gap = resolved.gap ?? 12;
-            const align = resolved.align ?? 'center';
-            return html`<div style="display:flex;flex-direction:row;align-items:${align};gap:${gap}px;flex-wrap:wrap">
-              ${children.map(cid => renderComponent(cid, surface, emit))}
-            </div>`;
-          }
-          case 'Text': return renderText(resolved, textStreaming);
-          case 'Button': return renderButton(resolved, emit);
-          case 'Link': return renderLink(resolved, emit);
-          case 'Card':
-            return html`<div class="card">
-              ${resolved.title ? html`<h3 class="card-title">${resolved.title}</h3>` : nothing}
-              ${renderComponent(resolved.child, surface, emit)}
-            </div>`;
-          case 'Divider':
-            return resolved.orientation === 'vertical'
-              ? html`<div style="width:1px;background:rgba(0,0,0,0.08);align-self:stretch"></div>`
-              : html`<div style="height:1px;background:rgba(0,0,0,0.08)"></div>`;
-          case 'Image': return renderImage(resolved);
-          case 'Badge': return renderBadge(resolved);
-          case 'TextField': return renderTextField(resolved, emit);
-          case 'ProgressBar': return renderProgressBar(resolved);
-          case 'OptionsGrid': return renderOptions(resolved, emit);
-          case 'RichMessageCard': return renderRichMessage(resolved, emit, headlineStreaming, rationaleStreaming);
-          default: return html`<span class="missing">[unsupported: ${resolved.component}]</span>`;
-        }
-      }
-      function isStreamingBinding(raw, surface) {
-        return !!(raw && typeof raw === 'object' && typeof raw.path === 'string' &&
-                  Object.keys(raw).length === 1 && surface.isStreaming(raw.path));
-      }
-      function renderText(c, streaming) {
-        const v = c.variant ?? 'body';
-        const text = c.text;
-        if (text == null || text === '') {
-          return html`<span class="text-shimmer ${v}"></span>`;
-        }
-        const cls = `t-${v}`;
-        const caret = streaming ? html`<span class="caret"></span>` : nothing;
-        if (v === 'h1') return html`<h1 class="${cls}">${text}${caret}</h1>`;
-        if (v === 'h2') return html`<h2 class="${cls}">${text}${caret}</h2>`;
-        return html`<p class="${cls}">${text}${caret}</p>`;
-      }
-      function renderButton(c, emit) {
-        const ready = c.label && c.action?.event?.name;
-        const v = c.variant ?? 'primary';
-        return html`<button class="btn btn-${v}" ?disabled=${!ready}
-          @click=${() => ready && emit(c.action.event.name, c.action.event.context ?? {}, c.label)}>
-          ${ready ? c.label : html`<span class="text-shimmer btnlabel"></span>`}
-        </button>`;
-      }
-      function renderOptions(c, emit) {
-        const opts = c.options ?? [];
-        return html`<div class="opts">
-          ${c.prompt ? html`<p class="opts-prompt">${c.prompt}</p>` : nothing}
-          ${opts.map(o => html`
-            <button class="opt" @click=${() => emit(o.action.event.name, o.action.event.context ?? {}, o.label)}>
-              ${o.emoji ? html`<span class="opt-emoji">${o.emoji}</span>` : nothing}
-              <span class="opt-body">
-                <span class="opt-label">${o.label ?? html`<span class="text-shimmer"></span>`}</span>
-                ${o.rationale ? html`<span class="opt-rationale">${o.rationale}</span>` : nothing}
-              </span>
-            </button>`)}
-        </div>`;
-      }
-      function renderRichMessage(c, emit, headlineStreaming, rationaleStreaming) {
-        const t = c.recommendationType ?? 'strong';
-        const tagLabel = { strong:'STRONG TAKE', positive:'POSITIVE', lifestyle:'LIFESTYLE',
-          informational:'INFO', professional:'PROFESSIONAL', alternative:'ALTERNATIVE' }[t] ?? 'RECOMMENDATION';
-        return html`<div class="rich rich-${t}">
-          <div class="rich-meta">
-            <span class="rich-tag">${tagLabel}</span>
-            ${c.confidence ? html`<span class="rich-conf">${String(c.confidence).toUpperCase()} CONFIDENCE</span>` : nothing}
-          </div>
-          ${c.headline ? html`<h2 class="rich-headline">${c.headline}${headlineStreaming ? html`<span class="caret"></span>` : nothing}</h2>`
-            : html`<h2 class="rich-headline"><span class="text-shimmer"></span></h2>`}
-          ${c.rationale ? html`<p class="rich-rationale">${c.rationale}${rationaleStreaming ? html`<span class="caret"></span>` : nothing}</p>`
-            : html`<p class="rich-rationale"><span class="text-shimmer"></span></p>`}
-          <div class="rich-actions">
-            ${actionBtn(c.confirmAction, 'primary', emit)}
-            ${actionBtn(c.dismissAction, 'ghost', emit)}
-          </div>
-        </div>`;
-      }
-      function actionBtn(a, variant, emit) {
-        if (!a) return nothing;
-        const ready = a.label && a.event?.name;
-        return html`<button class="btn btn-${variant}" ?disabled=${!ready}
-          @click=${() => ready && emit(a.event.name, a.event.context ?? {}, a.label)}>
-          ${ready ? a.label : html`<span class="text-shimmer btnlabel"></span>`}
-        </button>`;
-      }
-
-      // --- extended components (Row, Divider, Image, Link, Badge, TextField, ProgressBar) ---
-      function renderLink(c, emit) {
-        const label = c.label ?? '';
-        const url = c.url;
-        const ev = c.action?.event;
-        if (url) return html`<a class="a2ui-link" href="${url}" target="_blank" rel="noopener">${label}</a>`;
-        if (ev?.name) {
-          return html`<a class="a2ui-link" href="#" @click=${(e) => { e.preventDefault(); emit(ev.name, ev.context ?? {}, label); }}>${label}</a>`;
-        }
-        return html`<span class="muted">${label}</span>`;
-      }
-      function renderImage(c) {
-        const src = c.src ?? '';
-        const alt = c.alt ?? '';
-        const radius = c.cornerRadius ?? 8;
-        const maxHeight = c.maxHeight ?? 220;
-        if (!src) return html`<span class="text-shimmer" style="width:200px"></span>`;
-        return html`<img src="${src}" alt="${alt}" style="max-height:${maxHeight}px;max-width:100%;border-radius:${radius}px;display:block;object-fit:contain" />`;
-      }
-      function renderBadge(c) {
-        const label = (c.label ?? '').toUpperCase();
-        const v = c.variant ?? 'neutral';
-        return html`<span class="badge badge-${v}">${label}</span>`;
-      }
-      function renderTextField(c, emit) {
-        const label = c.label ?? '';
-        const placeholder = c.placeholder ?? '';
-        const ev = c.action?.event ?? { name: 'text_submitted', context: {} };
-        return html`<label class="tf-wrap">
-          ${label ? html`<span class="tf-label">${label}</span>` : nothing}
-          <input class="tf" placeholder=${placeholder}
-            @keydown=${(e) => {
-              if (e.key === 'Enter') {
-                const val = e.target.value.trim();
-                if (!val) return;
-                emit(ev.name, { ...(ev.context ?? {}), value: val }, val);
-                e.target.value = '';
-              }
-            }} />
-        </label>`;
-      }
-      function renderProgressBar(c) {
-        const value = Math.max(0, Math.min(1, c.value ?? 0));
-        const label = c.label;
-        return html`<div class="pb-wrap">
-          ${label ? html`<div class="pb-meta"><span>${label}</span><span>${Math.round(value * 100)}%</span></div>` : nothing}
-          <div class="pb-track"><div class="pb-fill" style="width:${value * 100}%"></div></div>
-        </div>`;
-      }
-
-      // ======================================================================
-      // SECTION 9 — App
-      // ======================================================================
+      // ==================================================================
+      // SECTION 7 — App shell
+      // ==================================================================
       class A2UIStarter extends LitElement {
-        static properties = { _tick: { state: true }, _composer: { state: true }, _devOpen: { state: true } };
+        static properties = {
+          _tick: { state: true },
+          _composer: { state: true },
+          _devOpen: { state: true },
+        };
         static styles = css`
           :host { display: grid; grid-template-columns: 1fr auto; height: 100%; max-width: 1200px; margin: 0 auto; }
-          .main-col { display: flex; flex-direction: column; min-width: 0; max-width: 720px; margin: 0 auto; width: 100%; }
-          header.top { padding: 16px 20px; border-bottom: 1px solid rgba(0,0,0,0.06); display: flex; align-items: center; justify-content: space-between; background: #fff; }
+          .main-col { display: flex; flex-direction: column; min-width: 0; max-width: 760px; margin: 0 auto; width: 100%; }
+          header.top { padding: 16px 20px; border-bottom: 1px solid rgba(0,0,0,0.06); display: flex; align-items: center; justify-content: space-between; background: #fff; gap: 12px; }
           .brand { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+          .brand .sub { font-weight: 400; color: #888; font-size: 12px; margin-left: 8px; }
           .muted { font-size: 12px; color: #666; }
+          .header-actions { display: flex; gap: 6px; align-items: center; }
+          .hdr-btn { padding: 6px 10px; font: 500 12px Inter; background: #f0f0f0; color: #111; border: none; border-radius: 8px; cursor: pointer; }
+          .hdr-btn:hover { background: #e3e3e3; }
+
           .transcript { flex: 1; overflow-y: auto; padding: 24px 20px 20px; }
           .transcript-inner { display: flex; flex-direction: column; gap: 20px; }
-          .turn-user      { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 18px 18px 4px 18px; background: #111; color: #fff; }
-          .turn-userPill  { align-self: flex-end; max-width: 80%; padding: 8px 12px;  border-radius: 18px 18px 4px 18px; background: #e5e5e5; color: #111; font-style: italic; }
+
+          .turn-user     { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 18px 18px 4px 18px; background: #111; color: #fff; }
+          .turn-userPill { align-self: flex-end; max-width: 80%; padding: 8px 12px;  border-radius: 18px 18px 4px 18px; background: #e5e5e5; color: #111; font-style: italic; }
+
           .thinking { display: flex; gap: 6px; padding: 10px 0; align-self: flex-start; }
           .thinking span { width: 8px; height: 8px; border-radius: 50%; background: #bbb; animation: bounce 1.2s infinite; }
           .thinking span:nth-child(2) { animation-delay: .15s; }
           .thinking span:nth-child(3) { animation-delay: .30s; }
           @keyframes bounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-5px); opacity: 1; } }
+
           footer.bottom { border-top: 1px solid rgba(0,0,0,0.06); padding: 14px 20px; background: #fff; }
           .composer { display: flex; gap: 8px; }
           .composer input { flex: 1; padding: 12px 14px; border-radius: 12px; border: 1px solid #ddd; font: inherit; }
           .composer button { padding: 12px 18px; border-radius: 12px; border: none; background: #111; color: #fff; cursor: pointer; font: inherit; }
 
-          .t-h1   { font-size: 26px; font-weight: 700; margin: 0; line-height: 1.2; }
-          .t-h2   { font-size: 19px; font-weight: 600; margin: 0; line-height: 1.3; }
-          .t-body { font-size: 15px; margin: 0; line-height: 1.55; color: #222; }
-          .btn { padding: 10px 16px; border-radius: 10px; border: none; cursor: pointer; font: inherit; font-weight: 500; font-size: 14px; }
-          .btn-primary { background: #111; color: #fff; }
-          .btn-ghost   { background: transparent; color: #111; text-decoration: underline; padding: 10px 0; }
-          .btn:disabled { opacity: .7; cursor: default; }
-          .card        { border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 16px; background: #fff; }
-          .card-title  { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+          a2ui-surface { display: block; }
 
-          .opts { display: flex; flex-direction: column; gap: 8px; }
-          .opts-prompt { margin: 0 0 4px; font-weight: 500; font-size: 14px; color: #555; }
-          .opt { display: flex; gap: 12px; text-align: left; padding: 14px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.08); background: #fff; cursor: pointer; font: inherit; }
-          .opt:hover { background: #f5f5f5; }
-          .opt-emoji { font-size: 20px; }
-          .opt-body { display: flex; flex-direction: column; gap: 2px; }
-          .opt-label { font-weight: 600; font-size: 14px; }
-          .opt-rationale { color: #666; font-size: 12.5px; line-height: 1.4; }
-
-          .rich { padding: 18px; border-radius: 16px; border: 1px solid; }
-          .rich-strong        { border-color: rgba(17,17,17,0.3); background: linear-gradient(135deg, rgba(17,17,17,0.10), rgba(17,17,17,0.02)); }
-          .rich-positive      { border-color: rgba(46,125,50,0.3); background: linear-gradient(135deg, rgba(46,125,50,0.10), rgba(46,125,50,0.02)); }
-          .rich-lifestyle     { border-color: rgba(230,81,0,0.3);  background: linear-gradient(135deg, rgba(230,81,0,0.10),  rgba(230,81,0,0.02)); }
-          .rich-informational { border-color: rgba(21,101,192,0.3); background: linear-gradient(135deg, rgba(21,101,192,0.10), rgba(21,101,192,0.02)); }
-          .rich-professional  { border-color: rgba(106,27,154,0.3); background: linear-gradient(135deg, rgba(106,27,154,0.10), rgba(106,27,154,0.02)); }
-          .rich-alternative   { border-color: rgba(173,20,87,0.3);  background: linear-gradient(135deg, rgba(173,20,87,0.10),  rgba(173,20,87,0.02)); }
-          .rich-meta { display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: .1em; margin-bottom: 10px; }
-          .rich-conf { color: #888; }
-          .rich-headline { font-size: 19px; font-weight: 700; margin: 0 0 8px; line-height: 1.25; }
-          .rich-rationale { font-size: 14px; line-height: 1.55; color: #333; margin: 0 0 14px; }
-          .rich-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-
-          /* RFC Proposal 1 — pending shimmer */
-          .text-shimmer { display: inline-block; height: 0.9em; border-radius: 4px;
-            width: 70%; background: linear-gradient(90deg, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0.14) 50%, rgba(0,0,0,0.06) 100%);
-            background-size: 200% 100%; animation: pulse 1.1s ease-in-out infinite; }
-          .text-shimmer.h1 { width: 280px; height: 1.1em; }
-          .text-shimmer.h2 { width: 200px; }
-          .text-shimmer.btnlabel { width: 90px; }
-          .pending-child { display: block; height: 18px; border-radius: 6px; background: linear-gradient(90deg, #eee 0%, #f5f5f5 50%, #eee 100%); background-size: 200% 100%; animation: pulse 1.2s ease-in-out infinite; }
-          @keyframes pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-
-          /* RFC Proposal 2 — streaming caret */
-          .caret { display: inline-block; width: 2px; height: 1em; background: #2e5cff; vertical-align: text-bottom; margin-left: 2px; animation: blink 0.5s step-end infinite alternate; }
-          @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
-
-          .missing { color: #c00; font-family: "JetBrains Mono", monospace; font-size: 12px; }
-
-          /* ---- extended components ---- */
-          .a2ui-link { color: #2e5cff; text-decoration: underline; cursor: pointer; }
-          .a2ui-link:hover { color: #1841d6; }
-          .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font: 600 10px/1 Inter; letter-spacing: 0.5px; }
-          .badge-neutral { background: rgba(0,0,0,0.08); color: rgba(0,0,0,0.7); }
-          .badge-success { background: rgba(46,125,50,0.15); color: #2e7d32; }
-          .badge-warning { background: rgba(230,81,0,0.15); color: #e65100; }
-          .badge-danger  { background: rgba(211,47,47,0.15); color: #d32f2f; }
-          .badge-info    { background: rgba(21,101,192,0.15); color: #1565c0; }
-          .tf-wrap { display: flex; flex-direction: column; gap: 6px; }
-          .tf-label { font: 500 13px/1.2 Inter; color: #666; }
-          .tf { padding: 10px 12px; border: none; background: #f5f5f5; border-radius: 10px; font: 14px/1.4 Inter; outline: none; }
-          .tf:focus { background: #eaeaea; }
-          .pb-wrap { display: flex; flex-direction: column; gap: 6px; }
-          .pb-meta { display: flex; justify-content: space-between; font: 12px/1.2 Inter; color: #666; }
-          .pb-track { height: 6px; background: rgba(0,0,0,0.08); border-radius: 4px; overflow: hidden; }
-          .pb-fill  { height: 6px; background: #2e5cff; border-radius: 4px; transition: width 0.15s ease; }
-
-          /* ---- devtools / wire-log panel ---- */
           .dev-col { width: 0; overflow: hidden; transition: width 0.18s ease; background: #1a1f2b; color: #c5cbd4; display: flex; flex-direction: column; }
-          .dev-col.open { width: 380px; }
+          .dev-col.open { width: 400px; }
           .dev-header { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.08); }
           .dev-title { font: 600 13px/1 Inter; color: #fff; letter-spacing: 0.02em; }
-          .dev-sub   { font: 11px/1.2 Inter; color: #8892a8; margin-top: 2px; }
+          .dev-sub   { font: 11px/1.2 Inter; color: #8892a8; margin-top: 4px; max-width: 320px; }
           .dev-close { background: transparent; border: none; color: #8892a8; cursor: pointer; font-size: 16px; padding: 4px 8px; }
           .dev-close:hover { color: #fff; }
           .dev-list  { flex: 1; overflow-y: auto; padding: 8px 10px; font: 11.5px/1.5 "JetBrains Mono", ui-monospace, monospace; }
-          .dev-entry { margin-bottom: 8px; }
+          .dev-entry { margin-bottom: 8px; border-left: 2px solid #2e5cff; padding-left: 8px; }
           .dev-when  { color: #7a839a; font-size: 10px; }
           .dev-json  { white-space: pre-wrap; word-break: break-word; }
-          .dev-k     { color: #b388ff; }
-          .dev-s     { color: #ffce7a; }
-          .dev-n     { color: #8be9a0; }
           .dev-toggle {
             position: fixed; top: 16px; right: 16px; z-index: 10;
             padding: 8px 12px; font: 500 12px Inter; background: #1a1f2b; color: #fff;
@@ -903,23 +763,16 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           this._tick = 0;
           this._composer = '';
           this._devOpen = false;
-          this._loadStatus = 'loading';  // 'loading' | 'ready' | 'error'
+          this._loadStatus = 'loading';
           this._loadDetail = '';
           this.runtime = null;
+          this.processor = null;
         }
 
         async _bootstrap() {
           try {
-            // Load catalog.json (metadata only — the runtime doesn't need it to
-            // work, but seeing it validates there's a real schema doc backing
-            // the shapes we render).
-            const catalog = await loadCatalog();
-            if (catalog) {
-              this._loadDetail = `Loaded catalog ${catalog.catalogId} with ${Object.keys(catalog.components).length} component schemas.`;
-            }
-            // Load skills from /web/skills/*.md
-            const skills = await loadSkillBundles(['greeting', 'planner', 'decider', 'critic']);
-            // API key / proxy resolution
+            const skills = await loadSkillBundles(['greeting', 'planner', 'decider', 'critic', 'kitchen']);
+
             let apiKey = '';
             if (!PROXY_URL) {
               apiKey = localStorage.getItem('a2ui_anthropic_key') || '';
@@ -928,19 +781,33 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
                 if (apiKey) localStorage.setItem('a2ui_anthropic_key', apiKey);
               }
             }
-            this.runtime = new SkillRuntime({ skills, defaultSkillId: 'greeting', proxyUrl: PROXY_URL, apiKey });
-            this._unsub = this.runtime.subscribe(() => { this._tick++; });
-            // Log what was loaded so the wire-log panel shows provenance.
-            this.runtime.wireLog.unshift({
-              ts: Date.now(),
-              msg: {
-                info: {
-                  loaded_catalog: catalog?.catalogId,
-                  loaded_skills: Array.from(skills.keys()),
-                  source: 'web/skills/*.md + catalog/catalog.json',
-                },
-              },
+
+            // The MessageProcessor is the source of truth for surface state.
+            // Its action handler is the bridge from button clicks back into
+            // the SkillRuntime.
+            const processor = new MessageProcessor([starterCatalog], (action) => {
+              // action = { name, surfaceId, sourceComponentId, timestamp, context }
+              const label = action.context?.__echo ?? null;
+              this.runtime?.handleUserEvent(action.name, action.context ?? {}, label);
             });
+            this.processor = processor;
+
+            this.runtime = new SkillRuntime({
+              skills, defaultSkillId: 'greeting', processor,
+              proxyUrl: PROXY_URL, apiKey,
+            });
+            this._unsub = this.runtime.subscribe(() => { this._tick++; });
+
+            this.runtime.wireLog.push({
+              ts: Date.now(),
+              msg: { info: {
+                loaded_skills: Array.from(skills.keys()),
+                starter_catalog_id: STARTER_CATALOG_ID,
+                basic_catalog_components: Array.from(basicCatalog.components.keys()),
+                starter_extensions: ['OptionsGrid', 'RichMessageCard'],
+              } },
+            });
+
             this._loadStatus = 'ready';
             this._tick++;
             this.runtime.primeGreeting();
@@ -956,7 +823,7 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           super.connectedCallback();
           this._bootstrap();
           this._scrollTimer = setInterval(() => {
-            const t = this.renderRoot.querySelector('.transcript');
+            const t = this.renderRoot?.querySelector('.transcript');
             if (t) t.scrollTop = t.scrollHeight;
           }, 120);
         }
@@ -965,8 +832,6 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
           this._unsub?.();
           clearInterval(this._scrollTimer);
         }
-
-        emit = (name, context, echoLabel) => this.runtime?.handleUserEvent(name, context, echoLabel);
 
         send() {
           const t = this._composer.trim();
@@ -977,16 +842,28 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
 
         render() {
           if (this._loadStatus === 'loading') {
-            return html`<div class="boot-state"><div class="thinking"><span></span><span></span><span></span></div> <span class="muted">Loading catalog + SKILL.md files…</span></div>`;
+            return html`<div class="boot-state">
+              <div class="thinking"><span></span><span></span><span></span></div>
+              <span class="muted">Loading official A2UI renderer + skills…</span>
+            </div>`;
           }
           if (this._loadStatus === 'error') {
-            return html`<div class="boot-state" style="color:#c00"><strong>Failed to bootstrap:</strong> ${this._loadDetail}</div>`;
+            return html`<div class="boot-state" style="color:#c00">
+              <strong>Failed to bootstrap:</strong> ${this._loadDetail}
+            </div>`;
           }
+          const basicCount = basicCatalog.components.size;
           return html`
             <div class="main-col">
               <header class="top">
-                <div class="brand">A2UI Web Starter</div>
-                <div class="muted">client-side skills · Claude-powered${PROXY_URL ? ' · via proxy' : ' · direct'}</div>
+                <div>
+                  <span class="brand">A2UI Web Starter</span>
+                  <span class="sub">official @a2ui/lit · ${basicCount} + 2 components</span>
+                </div>
+                <div class="header-actions">
+                  <button class="hdr-btn" @click=${() => this.runtime.handleUserEvent('show_kitchen_sink', {})}>Kitchen sink</button>
+                  <button class="hdr-btn" @click=${() => this.runtime.handleUserEvent('restart', {})}>Restart</button>
+                </div>
               </header>
               <div class="transcript">
                 <div class="transcript-inner">
@@ -1008,40 +885,34 @@ First person. Direct. If it has a real problem, say so. If it's good, say that.`
               <div class="dev-header">
                 <div>
                   <div class="dev-title">A2UI Wire Log</div>
-                  <div class="dev-sub">Every message the runtime produces, in v0.9 format.</div>
+                  <div class="dev-sub">Every v0.9 message sent to the official MessageProcessor. Proves the app is really speaking A2UI.</div>
                 </div>
                 <button class="dev-close" @click=${() => this._devOpen = false} title="Close">×</button>
               </div>
               <div class="dev-list">
-                ${this.runtime.wireLog.slice().reverse().slice(0, 120).map(entry => html`
+                ${this.runtime.wireLog.slice().reverse().slice(0, 200).map(entry => html`
                   <div class="dev-entry">
                     <div class="dev-when">${new Date(entry.ts).toLocaleTimeString()} · ${Object.keys(entry.msg).filter(k => k !== 'version').join(', ')}</div>
-                    <div class="dev-json">${this._highlight(JSON.stringify(entry.msg, null, 2))}</div>
+                    <div class="dev-json">${JSON.stringify(entry.msg, null, 2)}</div>
                   </div>
                 `)}
-                ${this.runtime.wireLog.length === 0 ? html`<div class="muted">No messages yet. Tap an option to see A2UI flow.</div>` : nothing}
+                ${this.runtime.wireLog.length === 0 ? html`<div class="muted">No messages yet.</div>` : nothing}
               </div>
             </aside>
             ${this._devOpen ? nothing : html`<button class="dev-toggle" @click=${() => this._devOpen = true}>Show A2UI wire log</button>`}
           `;
         }
 
-        _highlight(s) {
-          // Lit's html` template auto-escapes interpolations, so we can't return
-          // raw HTML. Use unsafeHTML would be heavier; for dev view we skip
-          // syntax highlighting and just return the text verbatim.
-          return s;
-        }
         _renderTurn(turn) {
           if (turn.kind === 'user')      return html`<div class="turn-user">${turn.text}</div>`;
           if (turn.kind === 'userPill')  return html`<div class="turn-userPill">${turn.label}</div>`;
           if (turn.kind === 'thinking')  return html`<div class="thinking"><span></span><span></span><span></span></div>`;
-          // agent
-          const s = this.runtime.surfaces.get(turn.surfaceId);
-          if (!s?.components.has('root')) {
-            return html`<div class="thinking"><span></span><span></span><span></span></div>`;
-          }
-          return renderComponent('root', s, this.emit);
+          // agent turn: mount an <a2ui-surface> for the given surfaceId.
+          // The surface property accepts a SurfaceModel — we pull it from the
+          // MessageProcessor, which has already applied updateComponents.
+          const surface = this.processor?.model.getSurface(turn.surfaceId);
+          if (!surface) return html`<div class="thinking"><span></span><span></span><span></span></div>`;
+          return html`<a2ui-surface .surface=${surface}></a2ui-surface>`;
         }
       }
       customElements.define('a2ui-starter', A2UIStarter);

@@ -6,6 +6,13 @@ the key attached, streams the SSE response back verbatim.
 
 ~70 lines of JS. Free tier: 100k requests/day.
 
+There are two implementations in this directory:
+
+- **`llm-proxy.js`** — the Cloudflare Worker, for production/public demos.
+- **`local-proxy.py`** — a zero-dependency Python 3 version of the same
+  proxy for local dev. Reads `ANTHROPIC_API_KEY` from the environment,
+  listens on `:8787`. Run it with `python3 local-proxy.py`.
+
 ## Deploy
 
 ```bash

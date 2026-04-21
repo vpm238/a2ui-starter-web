@@ -9,30 +9,48 @@ first_turn_skeleton:
       component: Text
       variant: h2
       text: { path: "/reply/headline" }
-    - id: o1_txt
+
+    # Option 1 card — basicCatalog Card holds a single child, so we pack
+    # the name + take into an inner Column and point Card.child at it.
+    - id: o1_name
+      component: Text
+      variant: h3
+      text: { path: "/reply/option1_name" }
+    - id: o1_take
       component: Text
       variant: body
       text: { path: "/reply/option1_take" }
+    - id: o1_col
+      component: Column
+      children: [o1_name, o1_take]
     - id: o1
       component: Card
-      title: { path: "/reply/option1_name" }
-      child: o1_txt
-    - id: o2_txt
+      child: o1_col
+
+    # Option 2 card
+    - id: o2_name
+      component: Text
+      variant: h3
+      text: { path: "/reply/option2_name" }
+    - id: o2_take
       component: Text
       variant: body
       text: { path: "/reply/option2_take" }
+    - id: o2_col
+      component: Column
+      children: [o2_name, o2_take]
     - id: o2
       component: Card
-      title: { path: "/reply/option2_name" }
-      child: o2_txt
+      child: o2_col
+
     - id: lean
       component: Text
       variant: body
       text: { path: "/reply/lean" }
+
     - id: root
       component: Column
       children: [hdr, o1, o2, lean]
-      gap: 14
 first_turn_fill_fields:
   headline:
     description: ONE sentence introducing the comparison.

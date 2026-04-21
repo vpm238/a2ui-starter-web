@@ -1,178 +1,79 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "catalogId": "a2ui-starter/core@0.1",
-  "version": "0.1.0",
-  "title": "A2UI Starter Catalog v0.1",
-  "description": "13-component catalog used by a2ui-starter-web and a2ui-starter-swiftui. Follows the Google A2UI basic_catalog.json shape: each entry declares the component name, its properties, and which fields are required. Clients ship a renderer per entry.",
-  "rfc_extensions": [
-    "progressive-rendering/proposal-1-pending",
-    "progressive-rendering/proposal-2-streaming-flag",
-    "progressive-rendering/proposal-3-append-op"
+  "version": "0.2.0",
+  "title": "A2UI Starter Catalog v0.2",
+  "description": "Catalog used by a2ui-starter-web. Extends Google's official basic_catalog with two custom components (OptionsGrid, RichMessageCard). The live zod schemas for the extensions are defined inline at the top of web/index.html; this JSON file is a human-readable reference mirroring that shape.",
+  "extends": "https://a2ui.org/specification/v0_9/basic_catalog.json",
+  "basic_catalog_components": [
+    "Text", "Button", "TextField", "Row", "Column", "List", "Image", "Icon",
+    "Video", "AudioPlayer", "Card", "Divider", "CheckBox", "Slider",
+    "DateTimeInput", "ChoicePicker", "Tabs", "Modal"
   ],
-  "components": {
-    "Column": {
-      "description": "Vertical layout primitive. Children stack top-to-bottom with configurable gap.",
-      "properties": {
-        "component": { "const": "Column" },
-        "id": { "type": "string" },
-        "children": { "type": "array", "items": { "type": "string", "description": "Component id reference" } },
-        "gap": { "type": "number", "default": 12 }
-      },
-      "required": ["component", "id", "children"]
-    },
-    "Row": {
-      "description": "Horizontal layout primitive. Children lay out left-to-right with vertical alignment.",
-      "properties": {
-        "component": { "const": "Row" },
-        "id": { "type": "string" },
-        "children": { "type": "array", "items": { "type": "string" } },
-        "gap": { "type": "number", "default": 12 },
-        "align": { "enum": ["top", "center", "bottom", "firstTextBaseline"], "default": "center" }
-      },
-      "required": ["component", "id", "children"]
-    },
-    "Text": {
-      "description": "Inline or block text. Supports typography variants that clients map to native type styles.",
-      "properties": {
-        "component": { "const": "Text" },
-        "id": { "type": "string" },
-        "text": {
-          "oneOf": [
-            { "type": "string" },
-            { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }
-          ]
-        },
-        "variant": { "enum": ["h1", "h2", "body", "caption"], "default": "body" }
-      },
-      "required": ["component", "id", "text"]
-    },
-    "Button": {
-      "description": "Tappable button. Emits a userAction event when pressed.",
-      "properties": {
-        "component": { "const": "Button" },
-        "id": { "type": "string" },
-        "label": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
-        "variant": { "enum": ["primary", "ghost", "danger"], "default": "primary" },
-        "action": { "$ref": "#/$defs/Action" }
-      },
-      "required": ["component", "id", "label"]
-    },
-    "Link": {
-      "description": "Inline clickable text. If `url` set, opens external link. If `action` set, fires an event like Button.",
-      "properties": {
-        "component": { "const": "Link" },
-        "id": { "type": "string" },
-        "label": { "type": "string" },
-        "url": { "type": "string", "format": "uri" },
-        "action": { "$ref": "#/$defs/Action" }
-      },
-      "required": ["component", "id", "label"]
-    },
-    "Card": {
-      "description": "Titled container wrapping one child component.",
-      "properties": {
-        "component": { "const": "Card" },
-        "id": { "type": "string" },
-        "title": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
-        "child": { "type": "string" }
-      },
-      "required": ["component", "id", "child"]
-    },
-    "Divider": {
-      "description": "Visual separator. Horizontal by default.",
-      "properties": {
-        "component": { "const": "Divider" },
-        "id": { "type": "string" },
-        "orientation": { "enum": ["horizontal", "vertical"], "default": "horizontal" }
-      },
-      "required": ["component", "id"]
-    },
-    "Image": {
-      "description": "URL-loaded image with async placeholder + fallback.",
-      "properties": {
-        "component": { "const": "Image" },
-        "id": { "type": "string" },
-        "src": { "type": "string", "format": "uri" },
-        "alt": { "type": "string" },
-        "cornerRadius": { "type": "number", "default": 8 },
-        "maxHeight": { "type": "number", "default": 220 }
-      },
-      "required": ["component", "id", "src"]
-    },
-    "Badge": {
-      "description": "Small labeled pill with semantic coloring.",
-      "properties": {
-        "component": { "const": "Badge" },
-        "id": { "type": "string" },
-        "label": { "type": "string" },
-        "variant": { "enum": ["neutral", "success", "warning", "danger", "info"], "default": "neutral" }
-      },
-      "required": ["component", "id", "label"]
-    },
-    "TextField": {
-      "description": "Labeled single-line input. Submits a named event on Enter; the typed value lands in the event context as `value`.",
-      "properties": {
-        "component": { "const": "TextField" },
-        "id": { "type": "string" },
-        "label": { "type": "string" },
-        "placeholder": { "type": "string" },
-        "action": { "$ref": "#/$defs/Action" }
-      },
-      "required": ["component", "id"]
-    },
-    "ProgressBar": {
-      "description": "Bar showing a 0..1 value with optional label + percent.",
-      "properties": {
-        "component": { "const": "ProgressBar" },
-        "id": { "type": "string" },
-        "value": { "type": "number", "minimum": 0, "maximum": 1 },
-        "label": { "type": "string" }
-      },
-      "required": ["component", "id", "value"]
-    },
+  "extensions": {
     "OptionsGrid": {
-      "description": "Picker of 2–4 options, each with label + rationale + emoji + per-option action.",
+      "description": "A stacked list of tappable options. Each option fires an A2UI event when tapped. Good for agent intake surfaces where the user picks from a small set of routes.",
       "properties": {
         "component": { "const": "OptionsGrid" },
         "id": { "type": "string" },
-        "prompt": { "type": "string" },
+        "prompt": {
+          "description": "Optional heading text shown above the options.",
+          "oneOf": [
+            { "type": "string" },
+            { "$ref": "#/$defs/PathBinding" }
+          ]
+        },
         "options": {
-          "type": "array", "minItems": 2, "maxItems": 8,
+          "type": "array",
           "items": {
             "type": "object",
+            "required": ["id", "label", "action"],
             "properties": {
               "id": { "type": "string" },
-              "label": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
-              "rationale": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
+              "label": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "$ref": "#/$defs/PathBinding" }
+                ]
+              },
+              "rationale": {
+                "description": "Short explanation shown under the label.",
+                "oneOf": [
+                  { "type": "string" },
+                  { "$ref": "#/$defs/PathBinding" }
+                ]
+              },
               "emoji": { "type": "string" },
               "action": { "$ref": "#/$defs/Action" }
-            },
-            "required": ["id", "label", "action"]
+            }
           }
         }
       },
       "required": ["component", "id", "options"]
     },
+
     "RichMessageCard": {
-      "description": "Signature opinionated-recommendation card. Headline + rationale + confirm/dismiss actions, with a semantic `recommendationType` that clients map to accent color + icon + tag label.",
+      "description": "Opinionated recommendation card. Headline + rationale + two actions (confirm / dismiss). Each side ships with a labeled button that fires its own event.",
       "properties": {
         "component": { "const": "RichMessageCard" },
         "id": { "type": "string" },
-        "headline": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
-        "rationale": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
-        "recommendationType": { "enum": ["strong", "positive", "lifestyle", "informational", "professional", "alternative"], "default": "strong" },
+        "recommendationType": {
+          "enum": ["strong", "positive", "lifestyle", "informational", "professional", "alternative"],
+          "default": "strong"
+        },
         "confidence": { "enum": ["low", "medium", "high"] },
-        "confirmAction": { "$ref": "#/$defs/BoundAction" },
-        "dismissAction": { "$ref": "#/$defs/BoundAction" }
+        "headline":  { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/PathBinding" } ] },
+        "rationale": { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/PathBinding" } ] },
+        "confirmAction": { "$ref": "#/$defs/LabeledAction" },
+        "dismissAction": { "$ref": "#/$defs/LabeledAction" }
       },
-      "required": ["component", "id", "headline", "rationale"]
+      "required": ["component", "id"]
     }
   },
   "$defs": {
     "PathBinding": {
       "type": "object",
-      "description": "A reference into the surface's data model via JSON Pointer. Resolves lazily at render time.",
-      "properties": { "path": { "type": "string" } },
+      "properties": { "path": { "type": "string", "description": "JSON Pointer into the surface's data model." } },
       "required": ["path"]
     },
     "Action": {
@@ -180,29 +81,29 @@
       "properties": {
         "event": {
           "type": "object",
+          "required": ["name"],
           "properties": {
-            "name": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
-            "context": { "type": "object", "additionalProperties": true }
-          },
-          "required": ["name"]
+            "name": { "type": "string" },
+            "context": { "type": "object" }
+          }
         }
       },
       "required": ["event"]
     },
-    "BoundAction": {
+    "LabeledAction": {
       "type": "object",
+      "required": ["label", "event"],
       "properties": {
-        "label": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
+        "label": { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/PathBinding" } ] },
         "event": {
           "type": "object",
+          "required": ["name"],
           "properties": {
-            "name": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PathBinding" }] },
+            "name": { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/PathBinding" } ] },
             "context": { "type": "object" }
-          },
-          "required": ["name"]
+          }
         }
-      },
-      "required": ["label", "event"]
+      }
     }
   }
 }

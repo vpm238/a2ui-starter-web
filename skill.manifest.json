@@ -1,8 +1,8 @@
 {
   "$schema": "https://a2ui.org/schemas/host-manifest.draft.json",
   "name": "a2ui-starter-web",
-  "version": "0.1.0",
-  "description": "Reference client-side A2UI host for the browser. Lit + client-side skills + Anthropic via Cloudflare Worker proxy. Parity with a2ui-starter-swiftui.",
+  "version": "0.2.0",
+  "description": "Reference client-side A2UI host for the browser. Uses Google's official @a2ui/web_core + @a2ui/lit, extended with a custom catalog (OptionsGrid, RichMessageCard). Claude via Cloudflare Worker proxy. Parity with a2ui-starter-swiftui.",
   "protocol": "a2ui/0.9",
   "host_type": "client",
   "provides": {
@@ -10,18 +10,33 @@
       { "platform": "web", "framework": "lit", "version": "3.x", "source": "web/index.html" }
     ],
     "catalogs": [
-      { "id": "a2ui/core@0.1", "components": ["Text", "Button", "Column", "Card", "OptionsGrid", "RichMessageCard"] }
+      {
+        "id": "a2ui-starter/core@0.1",
+        "extends": "https://a2ui.org/specification/v0_9/basic_catalog.json",
+        "components": [
+          "Text", "Button", "TextField", "Row", "Column", "List", "Image", "Icon",
+          "Video", "AudioPlayer", "Card", "Divider", "CheckBox", "Slider",
+          "DateTimeInput", "ChoicePicker", "Tabs", "Modal",
+          "OptionsGrid", "RichMessageCard"
+        ],
+        "extensions": ["OptionsGrid", "RichMessageCard"]
+      }
     ]
   },
   "requires": {
     "protocol": ">=0.9",
-    "rfc_extensions": ["progressive-rendering/proposal-1", "progressive-rendering/proposal-2", "progressive-rendering/proposal-3"]
+    "npm_packages": [
+      "@a2ui/web_core@^0.9.2",
+      "@a2ui/lit@^0.9.3",
+      "zod@^3.25.76"
+    ]
   },
   "bundled_skills": [
-    { "id": "greeting", "triggers": [],                 "description": "Static intake — no LLM call." },
-    { "id": "planner",  "triggers": ["want_plan"],      "description": "Break a goal into 3 concrete first steps." },
-    { "id": "decider",  "triggers": ["want_decision"],  "description": "Weigh two options. Take a position." },
-    { "id": "critic",   "triggers": ["want_feedback"],  "description": "One strong opinionated piece of feedback." }
+    { "id": "greeting", "triggers": [],                     "description": "Static intake — routes to planner/decider/critic." },
+    { "id": "planner",  "triggers": ["want_plan"],          "description": "Break a goal into 3 concrete first steps." },
+    { "id": "decider",  "triggers": ["want_decision"],      "description": "Weigh two options. Take a position." },
+    { "id": "critic",   "triggers": ["want_feedback"],      "description": "One strong opinionated piece of feedback." },
+    { "id": "kitchen",  "triggers": ["show_kitchen_sink"],  "description": "Static surface rendering every catalog component." }
   ],
   "llm": {
     "providers": [
@@ -32,6 +47,6 @@
   },
   "notes": [
     "Manifest shape is experimental. No host reads it today.",
-    "Proposed as a standard way for A2UI host apps to declare capabilities."
+    "Proposed as a standard way for A2UI host apps to declare their catalog + skill bundle."
   ]
 }
