@@ -5,22 +5,48 @@ triggers:
   - want_feedback
 first_turn_skeleton:
   components:
-    - id: rec
-      component: RichMessageCard
-      recommendationType: strong
-      confidence: medium
-      headline: { path: "/reply/headline" }
-      rationale: { path: "/reply/rationale" }
-      confirmAction:
-        label: { path: "/reply/confirm_label" }
-        event: { name: { path: "/reply/confirm_event" }, context: {} }
-      dismissAction:
-        label: { path: "/reply/dismiss_label" }
-        event: { name: { path: "/reply/dismiss_event" }, context: {} }
+    - id: tag
+      component: Text
+      variant: caption
+      text: "🎯 STRONG TAKE · MEDIUM CONFIDENCE"
+    - id: headline
+      component: Text
+      variant: h2
+      text: { path: "/reply/headline" }
+    - id: rationale
+      component: Text
+      variant: body
+      text: { path: "/reply/rationale" }
+    - id: confirm_label
+      component: Text
+      variant: body
+      text: { path: "/reply/confirm_label" }
+    - id: confirm_btn
+      component: Button
+      child: confirm_label
+      variant: primary
+      action: { event: { name: { path: "/reply/confirm_event" }, context: {} } }
+    - id: dismiss_label
+      component: Text
+      variant: body
+      text: { path: "/reply/dismiss_label" }
+    - id: dismiss_btn
+      component: Button
+      child: dismiss_label
+      variant: borderless
+      action: { event: { name: { path: "/reply/dismiss_event" }, context: {} } }
+    - id: actions
+      component: Row
+      children: [confirm_btn, dismiss_btn]
+    - id: card_body
+      component: Column
+      children: [tag, headline, rationale, actions]
+    - id: card
+      component: Card
+      child: card_body
     - id: root
       component: Column
-      children: [rec]
-      gap: 12
+      children: [card]
 first_turn_fill_fields:
   headline:
     description: ONE direct sentence — your take. No hedging.

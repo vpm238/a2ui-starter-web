@@ -1,0 +1,24 @@
+<!doctype html>
+<html><body>
+<div id="out">loading…</div>
+<script type="importmap">
+{ "imports": {
+    "lit": "https://esm.sh/lit@3.2.0",
+    "@a2ui/web_core/v0_9": "https://esm.sh/@a2ui/web_core@0.9.2/v0_9",
+    "@a2ui/lit/v0_9": "https://esm.sh/@a2ui/lit@0.9.3/v0_9"
+}}
+</script>
+<script type="module">
+try {
+  const wc = await import('@a2ui/web_core/v0_9');
+  const al = await import('@a2ui/lit/v0_9');
+  document.getElementById('out').textContent =
+    'web_core exports: ' + Object.keys(wc).slice(0, 10).join(', ') +
+    '\n\nlit exports: ' + Object.keys(al).slice(0, 10).join(', ');
+  document.getElementById('out').style.whiteSpace = 'pre-wrap';
+  document.getElementById('out').style.fontFamily = 'monospace';
+} catch (e) {
+  document.getElementById('out').textContent = 'FAILED: ' + e.message + '\n' + e.stack;
+}
+</script>
+</body></html>
