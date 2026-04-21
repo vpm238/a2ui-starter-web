@@ -158,7 +158,14 @@
                 this.lastEmitted = '';
                 continue;
               }
-              const hold = closing.length - 1;
+              // Minimal hold-back: only reserve trailing chars that could
+              // be the *start* of the closing tag. Holding back closing.length-1
+              // unconditionally swallows real content when the tail isn't tag-like.
+              const maxHold = Math.min(closing.length - 1, this.buffer.length);
+              let hold = 0;
+              for (let h = maxHold; h >= 1; h--) {
+                if (closing.startsWith(this.buffer.slice(-h))) { hold = h; break; }
+              }
               if (this.buffer.length > hold) {
                 const commit = this.buffer.slice(0, this.buffer.length - hold);
                 this.currentValue += commit;

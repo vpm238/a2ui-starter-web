@@ -30,14 +30,39 @@ Companion to [`a2ui-starter-swiftui`](https://github.com/vpm238/a2ui-starter-swi
          https://api.anthropic.com/v1/messages
 ```
 
-## Quick run (local, no proxy)
+## Quick run (local, with local proxy — recommended for demos)
+
+Two terminals. First, the local proxy (keeps your API key off the browser):
 
 ```bash
 git clone https://github.com/vpm238/a2ui-starter-web
+cd a2ui-starter-web
+export ANTHROPIC_API_KEY="sk-ant-..."
+python3 proxy/local-proxy.py      # listens on http://localhost:8787
+```
+
+Second terminal — serve the web app and point it at the proxy:
+
+```bash
+cd web
+# Add one line to point the app at the local proxy before the main script:
+printf '%s\n' "<script>window.A2UI_PROXY_URL='http://localhost:8787';</script>" > /tmp/pr.html
+sed -i.bak '/<script type="module">/i\
+'"$(cat /tmp/pr.html)" index.html   # one-time local patch (don't commit)
+python3 -m http.server 5173
+# Open http://localhost:5173
+```
+
+Or simpler — open `web/index.html` directly and accept the API-key prompt. That keeps the key in localStorage, no proxy required, but exposes it to any page with DevTools access. Fine for dev, never for a public demo.
+
+## Quick run (no proxy, direct Anthropic)
+
+```bash
 cd a2ui-starter-web/web
 python3 -m http.server 5173
 # Open http://localhost:5173
-# It'll prompt for an API key on first run (stored in localStorage — clear with `localStorage.clear()` in devtools)
+# First load: prompt for API key → stored in localStorage
+# Clear with `localStorage.clear()` in DevTools when done
 ```
 
 ## Ship it (Pages + Worker)
