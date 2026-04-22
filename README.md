@@ -2,7 +2,11 @@
 
 **Reference client-side [A2UI](https://a2ui.org/) starter for the browser.** Uses Google's official [`@a2ui/web_core`](https://www.npmjs.com/package/@a2ui/web_core) state machine + [`@a2ui/lit`](https://www.npmjs.com/package/@a2ui/lit) renderer, extended with a custom catalog. No bundler, no backend state. Claude via a tiny proxy.
 
-Companion to [`a2ui-starter-swiftui`](https://github.com/vpm238/a2ui-starter-swiftui) — same four skills, same skeleton-first streaming pattern, same [progressive-rendering RFC primitives](https://github.com/vpm238/a2ui-progressive-rendering-rfc). Runs in any modern browser; hostable on GitHub Pages.
+### 👉 [Try it live: vpm238.github.io/a2ui-starter-web](https://vpm238.github.io/a2ui-starter-web/)
+
+No install. Tap an option or type something — Claude streams replies into A2UI surfaces in real time. Top-right *Show A2UI wire log* to watch every v0.9 message go by. Top-right *Kitchen sink* to see every component in the catalog render at once.
+
+Companion to [`a2ui-starter-swiftui`](https://github.com/vpm238/a2ui-starter-swiftui) — same four skills, same skeleton-first streaming pattern, same [progressive-rendering RFC primitives](https://github.com/vpm238/a2ui-progressive-rendering-rfc).
 
 ## Architecture
 
